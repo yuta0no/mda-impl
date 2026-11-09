@@ -48,7 +48,7 @@ output: $1,000 (\mathrm{tok / prompt}) \times 23 (\mathrm{prompt / seed}) \times
 
 total cost:
 
-(ICL-MDA) $\simeq$ $4 (ICL-MDA)
+(ICL-MDA) $\simeq$ $4
 
 (ICL-LLM) $\simeq$ $8 (more costly because additionally needs API to experiment selection)
 
