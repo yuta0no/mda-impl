@@ -18,7 +18,7 @@ Since it is important to get a grasp of the estimated API cost before running ex
 
 Note that while the original paper uses GPT5.6 Luna. In this work, we use Claude Haiku 5.5 as an alternative for some reasons, and Haiku's API cost is $0.10 (input) / $0.50 (output) per 1M tokens for prompts up to 100K tokens ([source](https://platform.claude.com/docs/en/models/haiku-5-5/overview)).
 
-The prompt provided to the LLM can found in [./src/mda_impl/prompts/chem_propose.txt](./src/mda_impl/prompts/chem_propose.txt), and estimated its token count is approximately 400--1500 depending on the history lengths, according to [this unofficial token counter](https://wildandfreetools.com/ai-tools/token-counter/).
+The prompt provided to the LLM can be found in [./src/mda_impl/prompts/chem_propose.txt](./src/mda_impl/prompts/chem_propose.txt), and estimated its token count is approximately 400--1500 depending on the history lengths, according to [this unofficial token counter](https://wildandfreetools.com/ai-tools/token-counter/).
 There is also an official, free token count API endpoint provided by Anthropic, but it requires you to top-up your API credit first.
 (TODO: count API tokens using the official endpoint once I obtain API credits)
 
