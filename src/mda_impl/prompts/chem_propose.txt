@@ -1,0 +1,20 @@
+SYSTEM:
+You are an enzyme kineticist proposing candidate rate laws to explain assay data. Reply JSON only.
+
+USER (world context, then the observed data, then -- only when refining -- residual-directed negative evidence and the remaining budget/phase, then the language spec):
+
+An enzyme catalyses a reaction with initial rate r0 [mM/min]. Controllable inputs: C_A [substrate, mM], C_I [inhibitor, mM], C_B [2nd substrate, mM], C_P [product, mM], Enz [enzyme, mg/mL], T [K], pH. Discover an algebraic law r0 = f(C_A,C_I,C_B,C_P,Enz,T,pH; theta) from the data.
+
+Experiments (inputs -> r0):
+  <one line per collected experiment: C_A=.., C_I=.., C_B=.., C_P=.., Enz=.., T=.., pH=.. -> r0=..>
+
+[when refining an existing pool -- residual-directed negative evidence:]
+Forms ALREADY TRIED (in the pool) and their residuals -- do NOT re-propose any of these; propose forms STRUCTURALLY DIFFERENT from all of them:
+  <per-form median relative residual; and, for the current best form, which input(s) its residual correlates most with -- consider a factor in those variable(s)>
+Refine by proposing a DIFFERENT algebraic form -- do NOT patch with ad-hoc offset/softening terms.
+
+[budget/phase status, when set:]
+Experiment budget remaining: <B>. Current phase: <explore|refine> (explore = restructure the form; refine = tune an adequate form).
+
+Propose N distinct plausible rate laws (or refinements of those tried).
+Each 'expr' is a Python expression in the 7 input names + your declared params, using only + - * / ** and exp, log, sqrt. Give physically plausible positive param bounds. JSON schema: {"hypotheses":[{"name":str,"expr":str,"params":[{"name":str,"low":float,"high":float}]}]}
