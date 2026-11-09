@@ -32,7 +32,7 @@ input: $2,000 (tok / prompt) \times 23 (prompt / seed) \times 3 (seed / world) \
 
 output: $10,000 (tok / prompt) \times 23 (prompt / seed) \times 3 (seed / world) \times 57 (world) \simeq 40,000,000 (tokens)$
 
-total cost: $\simeq \$ 21$
+total cost: $\simeq$ $21
 
 **Note**: LLMs can propose hypotheses in an invalid format. Individually invalid hypotheses are simply discarded (MDA keeps "up to 12 valid, nonduplicate" proposals), so only responses that are unusable as a whole (e.g., unparseable JSON or output truncated at max_tokens) require a new call. If each proposal call is attempted at most N times in total, the worst-case proposal cost is N times the single-attempt estimate.
 
@@ -48,9 +48,9 @@ output: $1,000 (\mathrm{tok / prompt}) \times 23 (\mathrm{prompt / seed}) \times
 
 total cost:
 
-(ICL-MDA) $\simeq \$ 4$ (ICL-MDA)
+(ICL-MDA) $\simeq$ $4 (ICL-MDA)
 
-(ICL-LLM) $\simeq \$ 8$ (more costly because additionally needs API to experiment selection)
+(ICL-LLM) $\simeq$ $8 (more costly because additionally needs API to experiment selection)
 
 **LLM-AutoSciLab**: In the ChemBench configuration, each outer iteration makes one LLM call that both updates the working hypothesis (a primary law plus alternatives) and proposes search regions; the active-learning module then selects up to five concrete experiments within those regions. Additional calls propose adversarial validation experiments. Equations are fitted with PySR rather than by the LLM.
 
