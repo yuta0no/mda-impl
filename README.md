@@ -7,7 +7,7 @@ This repository implements [Model Discovery Agent (MDA)](https://arxiv.org/abs/2
 
 ### TL;DR
 
-For the ChemBench experiment, *conservative estimation* of API cost is <$100 if we use Claude Haiku 5.5 with medium effort.
+For the ChemBench experiment, *conservative estimate* of API cost is <$100 if we use Claude Haiku 5.5 with medium effort.
 
 
 ### Overview
