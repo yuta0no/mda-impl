@@ -11,11 +11,11 @@ For the ChemBench experiment, *conservative estimation* of API cost is <$100 if 
 
 #### Main experiment with MDA
 
-input: $ 2,000 (tok / prompt) \times 23 (prompt / seed) \times 3 (seed / world) \times 57 (world) \simeq 8,000,000 (tokens) $
+input: $2,000 (tok / prompt) \times 23 (prompt / seed) \times 3 (seed / world) \times 57 (world) \simeq 8,000,000 (tokens)$
 
-output: $ 10,000 (tok / prompt) \times 23 (prompt / seed) \times 3 (seed / world) \times 57 (world) \simeq 40,000,000 (tokens) $
+output: $10,000 (tok / prompt) \times 23 (prompt / seed) \times 3 (seed / world) \times 57 (world) \simeq 40,000,000 (tokens)$
 
-total cost: $ \simeq \$ 21 $
+total cost: $\simeq \$ 21$
 
 **Note**: LLMs can propose hypotheses in an invalid format. Individually invalid hypotheses are simply discarded (MDA keeps "up to 12 valid, nonduplicate" proposals), so only responses that are unusable as a whole (e.g., unparseable JSON or output truncated at max_tokens) require a new call. If each proposal call is attempted at most N times in total, the worst-case proposal cost is N times the single-attempt estimate.
 
@@ -25,13 +25,13 @@ total cost: $ \simeq \$ 21 $
 **ICL-based baselines**: To compute NMSLE, the original paper used only 60 heldout points, rather than the entire held-out 1000 points.
 This reduces the cost for ICL-based baselines.
 
-input: $ 5,000 (\mathrm{tok / prompt}) \times 23 (\mathrm{prompt / seed}) \times 3 (\mathrm{seed / world}) \times 57 (\mathrm{world}) \simeq 20,000,000 (\mathrm{tokens}) $
+input: $5,000 (\mathrm{tok / prompt}) \times 23 (\mathrm{prompt / seed}) \times 3 (\mathrm{seed / world}) \times 57 (\mathrm{world}) \simeq 20,000,000 (\mathrm{tokens})$
 
-output: $ 1,000 (\mathrm{tok / prompt}) \times 23 (\mathrm{prompt / seed}) \times 3 (\mathrm{seed / world}) \times 57 (\mathrm{world}) \simeq 4,000,000 (\mathrm{tokens}) $
+output: $1,000 (\mathrm{tok / prompt}) \times 23 (\mathrm{prompt / seed}) \times 3 (\mathrm{seed / world}) \times 57 (\mathrm{world}) \simeq 4,000,000 (\mathrm{tokens})$
 
 total cost:
-- $ \simeq \$ 4$ (ICL-MDA)
-- $ \simeq \$ 8$ (ICL-LLM; additionally needs API to experiment selection)
+- $\simeq \$ 4$ (ICL-MDA)
+- $\simeq \$ 8$ (ICL-LLM; additionally needs API to experiment selection)
 
 **LLM-AutoSciLab**: In the ChemBench configuration, each outer iteration makes one LLM call that both updates the working hypothesis (a primary law plus alternatives) and proposes search regions; the active-learning module then selects up to five concrete experiments within those regions. Additional calls propose adversarial validation experiments. Equations are fitted with PySR rather than by the LLM.
 
