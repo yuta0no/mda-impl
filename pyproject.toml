@@ -6,7 +6,7 @@ readme = "README.md"
 authors = [
     { name = "Yuta Ono", email = "youcana40627@gmail.com" }
 ]
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 dependencies = [
     "anthropic>=0.125.0",
     "python-dotenv>=1.2.1",
@@ -21,3 +21,24 @@ build-backend = "uv_build"
 
 [tool.uv.build-backend]
 module-name = "mda"
+
+[dependency-groups]
+dev = [
+    "ruff>=0.17.5",
+]
+
+[tool.ruff]
+line-length = 100
+src = ["src"]
+
+[tool.ruff.lint]
+select = [
+    "E", "W",  # pycodestyle
+    "F",       # pyflakes
+    "I",       # import sorting
+    "UP",      # pyupgrade: modernise syntax for your Python version
+    "B",       # bugbear: likely bugs
+    "SIM",     # simplifications
+    "NPY",     # numpy-specific checks
+]
+ignore = ["E501"]  # line length is handled by the formatter
