@@ -55,3 +55,25 @@ total cost:
 **LLM-AutoSciLab**: In the ChemBench configuration, each outer iteration makes one LLM call that both updates the working hypothesis (a primary law plus alternatives) and proposes search regions; the active-learning module then selects up to five concrete experiments within those regions. Additional calls propose adversarial validation experiments. Equations are fitted with PySR rather than by the LLM.
 
 In the MDA paper it is evaluated at budgets far below its original setting ($B = 60$) and reaches a 15.8% pass rate vs. MDA's 78.4% at $B = 25$. Given the [PySR](https://github.com/astroautomata/PySR) compute and the availability of the reported numbers, we might as well skip rerunning this baseline.
+
+
+## Notes
+
+### ChemBench
+
+Findings about ChemBench (ActiveSciBench-Chem) from reading and running the vendored oracle in [./src/mda/_vendor/autoscilab](./src/mda/_vendor/autoscilab):
+
+- **Observations are not the true law plus noise.** The oracle multiplies the true rate by a background temperature/pH factor (about -6% to +6%) before adding 1% noise, but scores against the true law alone. `World.truth` therefore calls the rate function directly.
+- **Three worlds start with all-zero observations.** In `c67_allosteric_act`, `c78_allosteric_act_arrhenius` and `c92_allosteric_act_feedback`, $C_I$ is an activator, and the passive set $D_0$ fixes $C_I = 0$, so all three initial rates are exactly 0.
+- **Two worlds do not implement their documented law.** In `c49_sinh_uncompetitive` and `c63_sinh_uncompetitive_arrhenius`, the rate function ignores the inhibitor, so the simulated and scored law is plain substrate inhibition (with an Arrhenius term in `c63`). `get_ground_truth_law_str()` for these two includes a $C_I$ term and does not match the oracle's own reference (RMSLE 0.80 and 1.31).
+
+
+### MDA
+
+- TODO
+
+
+### MDA vs ChemBench
+
+- **The upstream scorer drops invalid points.** `ChemBenchOracle.evaluate_law` masks out non-finite predictions before averaging. Following the MDA paper, `mda.metrics` counts them as a failure instead.
+- **Held-out set.** `World.heldout(42, 1000)` reproduces the test set used by `evaluate_law`.
