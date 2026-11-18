@@ -1,7 +1,6 @@
 import numpy as np
-from jaxtyping import Float
 
-Rates = Float[np.ndarray, " n"]
+from mda.arrays import Rates
 
 PASS_THRESHOLD = 0.05
 
