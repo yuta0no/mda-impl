@@ -9,6 +9,7 @@ authors = [
 requires-python = ">=3.10"
 dependencies = [
     "anthropic>=0.125.0",
+    "numpy>=2.2.6",
     "python-dotenv>=1.2.1",
 ]
 
@@ -30,6 +31,7 @@ dev = [
 [tool.ruff]
 line-length = 100
 src = ["src"]
+extend-exclude = ["src/mda/_vendor"]
 
 [tool.ruff.lint]
 select = [
