@@ -1,7 +1,7 @@
 [project]
 name = "mda-impl"
 version = "0.1.0"
-description = "Add your description here"
+description = "Reproduction of the Model Discovery Agent ChemBench experiment"
 readme = "README.md"
 authors = [
     { name = "Yuta Ono", email = "youcana40627@gmail.com" }
@@ -9,6 +9,8 @@ authors = [
 requires-python = ">=3.10"
 dependencies = [
     "anthropic>=0.125.0",
+    "jaxtyping>=0.3.7",
+    "numpy>=2.2.6",
     "python-dotenv>=1.2.1",
 ]
 
@@ -24,12 +26,15 @@ module-name = "mda"
 
 [dependency-groups]
 dev = [
+    "beartype>=0.23.1",
+    "pytest>=9.2.0",
     "ruff>=0.17.5",
 ]
 
 [tool.ruff]
 line-length = 100
 src = ["src"]
+extend-exclude = ["src/mda/_vendor"]
 
 [tool.ruff.lint]
 select = [
@@ -41,4 +46,13 @@ select = [
     "SIM",     # simplifications
     "NPY",     # numpy-specific checks
 ]
-ignore = ["E501"]  # line length is handled by the formatter
+ignore = [
+    "E501",  # line length is handled by the formatter
+    "F722",  # jaxtyping shape strings are not forward annotations
+]
+
+[tool.pytest.ini_options]
+addopts = "--jaxtyping-packages=mda,beartype.beartype"
+filterwarnings = [
+    'ignore:Function mda\._vendor:beartype.roar.BeartypeDecorHintPep585DeprecationWarning',
+]
