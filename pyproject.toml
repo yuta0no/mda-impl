@@ -1,7 +1,7 @@
 [project]
 name = "mda-impl"
 version = "0.1.0"
-description = "Add your description here"
+description = "Reproduction of the Model Discovery Agent ChemBench experiment"
 readme = "README.md"
 authors = [
     { name = "Yuta Ono", email = "youcana40627@gmail.com" }
