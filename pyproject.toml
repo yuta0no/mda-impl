@@ -50,3 +50,6 @@ ignore = ["E501"]  # line length is handled by the formatter
 
 [tool.pytest.ini_options]
 addopts = "--jaxtyping-packages=mda,beartype.beartype"
+filterwarnings = [
+    'ignore:Function mda\._vendor:beartype.roar.BeartypeDecorHintPep585DeprecationWarning',
+]
