@@ -1,3 +1,5 @@
+from typing import Any
+
 import numpy as np
 import pytest
 
@@ -85,7 +87,7 @@ def test_ground_truth_law_scores_zero(domain):
     assert upstream["rmsle"] < 1e-3
 
     # our truth + held-out set + metric give the same score
-    namespace = {"np": np}
+    namespace: dict[str, Any] = {"np": np}
     exec(law_str, namespace)
     X = world.heldout(seed=42, n=1000)  # same seed and n as `world.oracle.evaluate_law`
     y_pred = np.array([namespace["discovered_law"](*row) for row in X.tolist()], dtype=float)
