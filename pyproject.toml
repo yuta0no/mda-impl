@@ -46,7 +46,10 @@ select = [
     "SIM",     # simplifications
     "NPY",     # numpy-specific checks
 ]
-ignore = ["E501"]  # line length is handled by the formatter
+ignore = [
+    "E501",  # line length is handled by the formatter
+    "F722",  # jaxtyping shape strings are not forward annotations
+]
 
 [tool.pytest.ini_options]
 addopts = "--jaxtyping-packages=mda,beartype.beartype"

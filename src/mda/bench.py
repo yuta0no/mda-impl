@@ -2,6 +2,7 @@ import logging
 from dataclasses import dataclass
 
 import numpy as np
+from jaxtyping import Float
 
 from mda._vendor.autoscilab.oracle import chembench as _chembench
 from mda._vendor.autoscilab.oracle.chembench import (
@@ -55,11 +56,11 @@ def _warp(X):
 _LO, _HI = _warp(BOUNDS[:, 0]), _warp(BOUNDS[:, 1])
 
 
-def to_unit(X) -> np.ndarray:
+def to_unit(X: Float[np.ndarray, "*batch 7"]) -> Float[np.ndarray, "*batch 7"]:
     return (_warp(X) - _LO) / (_HI - _LO)
 
 
-def from_unit(U) -> np.ndarray:
+def from_unit(U: Float[np.ndarray, "*batch 7"]) -> Float[np.ndarray, "*batch 7"]:
     Z = _LO + np.clip(U, 0.0, 1.0) * (_HI - _LO)
     X = np.where(LOG_AXES, np.exp(np.where(LOG_AXES, Z, 0.0)), Z)
     return np.clip(X, BOUNDS[:, 0], BOUNDS[:, 1])
