@@ -71,11 +71,13 @@ def compile_hypothesis(h: Hypothesis) -> Callable[[Theta, Conditions], Rates]:
     Raises `HypothesisError` for anything else, for invalid parameter declarations, and for
     declared parameters that `expr` does not use. The expression is never passed to `eval`.
     Numerical problems (division by zero, overflow, log of a negative number) do not raise:
-    they return inf or nan.
+    they return inf or nan. Whitespace, including line breaks, is ignored.
     """
     params = _check_params(h.params)
     try:
-        tree = ast.parse(h.expr.strip(), mode="eval")
+        # Collapse whitespace so line breaks outside brackets parse. Safe because the grammar has
+        # no string literals, and joining with a space never merges two tokens.
+        tree = ast.parse(" ".join(h.expr.split()), mode="eval")
         used: set[str] = set()
         root = _build(tree.body, {n: j for j, n in enumerate(INPUT_NAMES)}, params, used)
     except HypothesisError:

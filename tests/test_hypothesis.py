@@ -46,6 +46,34 @@ def test_matches_numpy():
     assert np.allclose(compile_hypothesis(h)(np.array([0.5, 1.5]), X), expected)
 
 
+@pytest.mark.parametrize(
+    "expr",
+    [
+        "kcat*Enz*C_A/(Km+C_A)",
+        "  kcat * Enz * C_A / ( Km + C_A )  ",
+        "kcat *  Enz  * C_A / (Km + C_A )  ",
+        "kcat\u3000*\u3000Enz\u3000*\u3000C_A / (Km + C_A )  ",
+        "kcat\u00a0*\u00a0Enz\u00a0*\u00a0C_A / (Km + C_A )  ",
+        "kcat * Enz * C_A /\n(Km + C_A)",
+        "kcat * Enz\t* C_A\r\n/ (Km + C_A)\n",
+    ],
+    ids=[
+        "no-spaces",
+        "extra-spaces",
+        "more-spaces",
+        "full-width-spaces",
+        "non-breaking-spaces",
+        "newline",
+        "tab-crlf",
+    ],
+)
+def test_whitespace_is_ignored(expr):
+    X = _X()
+    theta = np.array([2.0, 0.5])
+    h = Hypothesis(MM.name, expr, MM.params)
+    assert np.array_equal(compile_hypothesis(h)(theta, X), compile_hypothesis(MM)(theta, X))
+
+
 @pytest.mark.parametrize("expr", ["2", "k", "k * 2"])
 def test_constant_expression_has_shape_n(expr):
     params = (Param("k", 0.0, 10.0),) if "k" in expr else ()
