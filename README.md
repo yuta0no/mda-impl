@@ -2,6 +2,31 @@
 
 This repository implements [Model Discovery Agent (MDA)](https://arxiv.org/abs/2608.09696).
 
+## Development
+
+The project is managed with [uv](https://docs.astral.sh/uv/), which also installs the Python version in `.python-version` (3.12) if it is missing. CI tests on Python 3.12 and 3.13.
+
+```sh
+uv sync                      # create .venv with the package and the dev tools (pytest, ruff, ty, beartype)
+uv tool install pre-commit   # once per machine
+pre-commit install           # once per clone: run the hooks on every commit
+cp .env.sample .env          # then set ANTHROPIC_API_KEY in .env
+```
+
+`.env` is ignored by git. The API key is only needed by code that calls the Claude API, such as `tools/token_count.py`.
+
+### Checks
+
+| Command | What it runs |
+| --- | --- |
+| `uv run pytest` | The tests. For the calls the tests make into `mda`, they also check jaxtyping shape and dtype annotations at runtime. |
+| `uv run ty check` | The static type checker. It reads jaxtyping annotations as plain `np.ndarray`, so it does not check shapes or dtypes. |
+| `pre-commit run --all-files` | Every hook: file checks, ruff lint and format, `uv.lock` sync, and ty. |
+
+- Add dependencies with `uv add <package>`, or `uv add --dev <package>` for dev tools, so that `uv.lock` stays in sync. CI installs with `uv sync --locked`, which fails if the lock file is out of date.
+- `src/mda/_vendor` is excluded from ruff and ty and kept identical to upstream (see [Upstream code defects](#upstream-code-defects)), so don't edit it.
+
+
 ## API cost
 
 A conservative estimate for the full ChemBench experiment is under $100 with Claude Haiku 5.5 at medium effort.
