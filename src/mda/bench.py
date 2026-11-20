@@ -22,7 +22,7 @@ def _print_to_log(*args, sep=" ", **_kwargs):
 
 
 # use logger instead of print
-_chembench.print = _print_to_log  # pyright: ignore[reportAttributeAccessIssue]
+_chembench.print = _print_to_log  # pyright: ignore[reportAttributeAccessIssue]  # ty: ignore[missing-attribute]
 
 
 # re-export parameters from vendored autoscilab
