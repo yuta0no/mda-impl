@@ -32,6 +32,10 @@ cp .env.sample .env          # then set ANTHROPIC_API_KEY in .env
 A conservative estimate for the full ChemBench experiment is under $100 with Claude Haiku 5.5 at medium effort.
 See [docs/api-cost-estimation.md](./docs/api-cost-estimation.md) for the breakdown.
 
+## Implementation plan
+
+[docs/blueprint.md](./docs/blueprint.md) lists the remaining work and the branch that implements each part. [docs/chembench-spec.md](./docs/chembench-spec.md) collects what the paper specifies for the ChemBench experiment, and the defaults we choose where it says nothing.
+
 ## Notes
 
 ### ChemBench
