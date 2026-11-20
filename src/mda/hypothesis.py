@@ -1,6 +1,8 @@
 import ast
+import json
 import keyword
 import math
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -32,6 +34,10 @@ class Hypothesis:
 
 class HypothesisError(ValueError):
     """Raised when a hypothesis cannot be compiled."""
+
+
+class ProposalParseError(ValueError):
+    """Raised when an LLM reply contains no `{"hypotheses": [...]}` object at all."""
 
 
 FUNCTIONS: dict[str, Callable[[Any], Any]] = {
@@ -135,3 +141,76 @@ def _build(node: ast.expr, inputs: dict[str, int], params: dict[str, int], used:
             arg = _build(arg_node, inputs, params, used)
             return lambda theta, X: func(arg(theta, X))
     raise HypothesisError(f"unsupported syntax: {ast.unparse(node)!r}")
+
+
+_FENCE = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL | re.IGNORECASE)
+
+
+def parse_hypotheses(text: str) -> tuple[list[Hypothesis], list[str]]:
+    """Parse an LLM reply in the format of `src/mda/prompts/chem_propose.txt`.
+
+    Accepts bare JSON, JSON inside a ``` code fence, or JSON surrounded by prose.
+    Each hypothesis is validated individually and must pass `compile_hypothesis`; invalid ones are
+    dropped. Returns `(hypotheses, rejected)`, where `rejected` holds one reason per dropped entry.
+
+    Raises `ProposalParseError` only when the reply as a whole is unusable: no JSON object can be
+    decoded, or it has no `hypotheses` list. A reply whose hypotheses are all invalid returns
+    `([], reasons)`; the caller decides whether to retry.
+    """
+    data = _decode(text)
+    if not isinstance(data, dict) or not isinstance(items := data.get("hypotheses"), list):
+        raise ProposalParseError('reply has no "hypotheses" list')
+    hypotheses: list[Hypothesis] = []
+    rejected: list[str] = []
+    for k, item in enumerate(items):
+        try:
+            h = _to_hypothesis(item)
+            compile_hypothesis(h)
+        except HypothesisError as e:
+            rejected.append(f"hypothesis {k}: {e}")
+            continue
+        hypotheses.append(h)
+    return hypotheses, rejected
+
+
+def _decode(text: str) -> Any:
+    candidates = [text, *_FENCE.findall(text)]
+    if (start := text.find("{")) != -1 and (end := text.rfind("}")) > start:
+        candidates.append(text[start : end + 1])
+    for c in candidates:
+        try:
+            return json.loads(c)
+        except json.JSONDecodeError:
+            continue
+    raise ProposalParseError(f"no JSON object found in reply: {text[:200]!r}")
+
+
+def _to_hypothesis(item: Any) -> Hypothesis:
+    if not isinstance(item, dict):
+        raise HypothesisError(f"expected an object, got {type(item).__name__}")
+    name, expr, params = item.get("name"), item.get("expr"), item.get("params")
+    if not isinstance(name, str):
+        raise HypothesisError('"name" must be a string')
+    if not isinstance(expr, str):
+        raise HypothesisError(f'{name!r}: "expr" must be a string')
+    if not isinstance(params, list):
+        raise HypothesisError(f'{name!r}: "params" must be a list')
+    return Hypothesis(name=name, expr=expr, params=tuple(_to_param(name, p) for p in params))
+
+
+def _to_param(hname: str, p: Any) -> Param:
+    if not isinstance(p, dict) or not isinstance(pname := p.get("name"), str):
+        raise HypothesisError(f'{hname!r}: each param must be an object with a string "name"')
+    return Param(
+        pname, _to_float(hname, pname, p.get("low")), _to_float(hname, pname, p.get("high"))
+    )
+
+
+def _to_float(hname: str, pname: str, v: Any) -> float:
+    # JSON integers arrive as int, which beartype rejects for `float` fields; bool is an int subclass
+    if isinstance(v, bool) or not isinstance(v, int | float | str):
+        raise HypothesisError(f"{hname!r}: bound of {pname!r} must be a number, got {v!r}")
+    try:
+        return float(v)
+    except ValueError as e:
+        raise HypothesisError(f"{hname!r}: bound of {pname!r} must be a number, got {v!r}") from e
