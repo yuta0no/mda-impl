@@ -71,18 +71,22 @@ def compile_hypothesis(h: Hypothesis) -> Callable[[Theta, Conditions], Rates]:
     Raises `HypothesisError` for anything else, for invalid parameter declarations, and for
     declared parameters that `expr` does not use. The expression is never passed to `eval`.
     Numerical problems (division by zero, overflow, log of a negative number) do not raise:
-    they return inf or nan. Whitespace, including line breaks, is ignored.
+    they return inf or nan. Whitespace, including line breaks, and `#` comments are ignored.
     """
     params = _check_params(h.params)
     try:
-        # Collapse whitespace so line breaks outside brackets parse. Safe because the grammar has
-        # no string literals, and joining with a space never merges two tokens.
-        tree = ast.parse(" ".join(h.expr.split()), mode="eval")
+        # Drop comments, then collapse whitespace so line breaks outside brackets parse. Safe
+        # because the grammar has no string literals: `#` always starts a comment, which ends at
+        # its line break, and joining with a space never merges two tokens. Comments must go
+        # first, or collapsing would let a comment swallow the lines after it.
+        code = " ".join(line.partition("#")[0] for line in h.expr.splitlines())
+        tree = ast.parse(" ".join(code.split()), mode="eval")
         used: set[str] = set()
         root = _build(tree.body, {n: j for j, n in enumerate(INPUT_NAMES)}, params, used)
     except HypothesisError:
         raise
-    except (SyntaxError, ValueError, RecursionError, MemoryError) as e:
+    # OverflowError: an integer literal too large for a float
+    except (SyntaxError, ValueError, OverflowError, RecursionError, MemoryError) as e:
         raise HypothesisError(f"cannot parse expr {h.expr!r}: {e}") from e
     if unused := [p.name for p in h.params if p.name not in used]:
         raise HypothesisError(f"declared parameters not used in expr: {unused}")
@@ -182,7 +186,9 @@ def _decode(text: str) -> Any:
     for c in candidates:
         try:
             return json.loads(c)
-        except json.JSONDecodeError:
+        # ValueError covers JSONDecodeError and integers over Python's digit limit;
+        # RecursionError covers deeply nested arrays or objects
+        except (ValueError, RecursionError):
             continue
     raise ProposalParseError(f"no JSON object found in reply: {text[:200]!r}")
 
@@ -216,3 +222,5 @@ def _to_float(hname: str, pname: str, v: Any) -> float:
         return float(v)
     except ValueError as e:
         raise HypothesisError(f"{hname!r}: bound of {pname!r} must be a number, got {v!r}") from e
+    except OverflowError as e:  # an integer too large for a float
+        raise HypothesisError(f"{hname!r}: bound of {pname!r} is too large for a float") from e

@@ -20,6 +20,7 @@ MM = Hypothesis(
     expr="kcat * Enz * C_A / (Km + C_A)",
     params=(Param("kcat", 1e-2, 1e3), Param("Km", 1e-3, 1e3)),
 )
+_HUGE_INT = "1" + "0" * 400  # an integer too large for a float
 
 
 def _X(n: int = 50) -> np.ndarray:
@@ -74,6 +75,27 @@ def test_whitespace_is_ignored(expr):
     assert np.array_equal(compile_hypothesis(h)(theta, X), compile_hypothesis(MM)(theta, X))
 
 
+@pytest.mark.parametrize(
+    "expr",
+    [
+        "k * C_A + C_B  # first order in each substrate",
+        "# first order in each substrate\nk * C_A + C_B",
+        "k * C_A  # first order in A\n+ C_B",
+        "k * C_A  # first order in A\r\n+ C_B",
+        "k * C_A  # first order in A\r+ C_B",
+        "(k * C_A  # first order in A\n+ C_B)",
+    ],
+    ids=["trailing", "own-line", "mid-expr", "mid-expr-crlf", "mid-expr-cr", "inside-brackets"],
+)
+def test_comments_are_ignored(expr):
+    # a comment ends at its line break, so "mid-expr" must not compile to just `k * C_A`
+    X = _X()
+    theta = np.array([2.0])
+    params = (Param("k", 0.0, 10.0),)
+    expected = compile_hypothesis(Hypothesis("ref", "k * C_A + C_B", params))(theta, X)
+    assert np.array_equal(compile_hypothesis(Hypothesis("c", expr, params))(theta, X), expected)
+
+
 @pytest.mark.parametrize("expr", ["2", "k", "k * 2"])
 def test_constant_expression_has_shape_n(expr):
     params = (Param("k", 0.0, 10.0),) if "k" in expr else ()
@@ -117,6 +139,8 @@ def test_wrong_theta_shape_raises():
         "unknown * C_A",
         "",
         "C_A +",
+        "# only a comment",
+        pytest.param(_HUGE_INT + " * C_A", id="int-too-large-for-float"),
     ],
 )
 def test_rejects_unsupported_expr(expr):
@@ -198,6 +222,16 @@ def test_parse_accepts_no_params():
         '{"name": "x", "expr": "k * C_A", "params": [{"name": "k", "high": 1}]}',  # missing low
         '{"name": "x", "expr": "abs(k * C_A)", "params": [{"name": "k", "low": 0, "high": 1}]}',
         '{"name": "x", "expr": "k * C_A", "params": [{"name": "k", "low": 2, "high": 1}]}',
+        pytest.param(
+            '{"name": "x", "expr": "k * C_A", "params": [{"name": "k", "low": 0, "high": '
+            + _HUGE_INT
+            + "}]}",
+            id="bound-too-large-for-float",
+        ),
+        pytest.param(
+            '{"name": "x", "expr": "' + _HUGE_INT + ' * C_A", "params": []}',
+            id="expr-int-too-large-for-float",
+        ),
     ],
 )
 def test_parse_drops_invalid_and_keeps_valid(bad: str):
@@ -231,6 +265,9 @@ def test_parse_empty_list():
         '{"proposals": []}',
         '{"hypotheses": {}}',
         "[1, 2]",
+        # json.loads rejects integers over Python's default limit of 4300 digits
+        pytest.param('{"hypotheses": [' + "1" * 5000 + "]}", id="int-over-digit-limit"),
+        pytest.param("[" * 100_000 + "]" * 100_000, id="deeply-nested"),
     ],
 )
 def test_parse_unusable_reply_raises(text: str):
