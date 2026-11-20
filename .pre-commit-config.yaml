@@ -25,3 +25,14 @@ repos:
     rev: 0.13.7
     hooks:
       - id: uv-lock
+
+  - repo: local
+    hooks:
+      # Runs in the project environment, so ty sees the installed dependencies and uses the
+      # version pinned in uv.lock. It checks the whole project, as configured in pyproject.toml.
+      - id: ty
+        name: ty check
+        entry: uv run ty check
+        language: system
+        types_or: [python, pyi]
+        pass_filenames: false
