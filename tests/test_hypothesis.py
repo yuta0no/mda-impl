@@ -222,8 +222,23 @@ _MM_JSON = f'{{"hypotheses": [{_MM_ITEM}]}}'
         f"```json\n{_MM_JSON}\n```",
         f"```\n{_MM_JSON}\n```",
         f"Here are my proposals:\n{_MM_JSON}\nLet me know if you need more.",
+        f"The rate depends on {{C_A, Enz}}, so I fit {{kcat, Km}}:\n{_MM_JSON}",
+        f"Unbalanced {{ brace, then a set {{1, 2}} and {{ another.\n{_MM_JSON}",
+        f'Each entry looks like {{"name": "...", "expr": "..."}}.\n```json\n{_MM_JSON}\n```',
+        f"{_MM_JSON}\nNote: the {{Km}} bound is loose.",
+        f"{{x}} before and {{y}} after: {_MM_JSON} {{z}}",
     ],
-    ids=["bare", "json-fence", "plain-fence", "prose"],
+    ids=[
+        "bare",
+        "json-fence",
+        "plain-fence",
+        "prose",
+        "braces-before",
+        "unbalanced-braces-before",
+        "example-object-before",
+        "braces-after",
+        "braces-both-sides",
+    ],
 )
 def test_parse_extracts_json(text: str):
     hs, rejected = parse_hypotheses(text)

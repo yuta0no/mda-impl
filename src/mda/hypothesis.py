@@ -2,7 +2,6 @@ import ast
 import json
 import keyword
 import math
-import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -149,13 +148,11 @@ def _build(node: ast.expr, inputs: dict[str, int], params: dict[str, int], used:
     raise HypothesisError(f"unsupported syntax: {ast.unparse(node)!r}")
 
 
-_FENCE = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL | re.IGNORECASE)
-
-
 def parse_hypotheses(text: str) -> tuple[list[Hypothesis], list[str]]:
     """Parse an LLM reply in the format of `src/mda/prompts/chem_propose.txt`.
 
-    Accepts bare JSON, JSON inside a ``` code fence, or JSON surrounded by prose.
+    Accepts bare JSON, JSON inside a ``` code fence, or JSON surrounded by prose, even when the
+    prose itself contains braces. The first JSON object with a `hypotheses` list is used.
     Each hypothesis is validated individually and must pass `compile_hypothesis`; invalid ones are
     dropped. Returns `(hypotheses, rejected)`, where `rejected` holds one reason per dropped entry.
 
@@ -163,9 +160,7 @@ def parse_hypotheses(text: str) -> tuple[list[Hypothesis], list[str]]:
     decoded, or it has no `hypotheses` list. A reply whose hypotheses are all invalid returns
     `([], reasons)`; the caller decides whether to retry.
     """
-    data = _decode(text)
-    if not isinstance(data, dict) or not isinstance(items := data.get("hypotheses"), list):
-        raise ProposalParseError('reply has no "hypotheses" list')
+    items = _decode(text)
     hypotheses: list[Hypothesis] = []
     rejected: list[str] = []
     for k, item in enumerate(items):
@@ -179,17 +174,30 @@ def parse_hypotheses(text: str) -> tuple[list[Hypothesis], list[str]]:
     return hypotheses, rejected
 
 
-def _decode(text: str) -> Any:
-    candidates = [text, *_FENCE.findall(text)]
-    if (start := text.find("{")) != -1 and (end := text.rfind("}")) > start:
-        candidates.append(text[start : end + 1])
-    for c in candidates:
+def _decode(text: str) -> list[Any]:
+    """Return the `hypotheses` list of the first JSON object in `text` that has one.
+
+    Tries to decode an object at every `{`, so braces in surrounding prose (before or after the
+    JSON, or in a code fence's language tag line) do not matter. Objects without a `hypotheses`
+    list, such as `{x}` or an example `{"name": ...}` in the prose, are skipped.
+    """
+    decoder = json.JSONDecoder()
+    found_object = False
+    start = text.find("{")
+    while start != -1:
         try:
-            return json.loads(c)
+            obj, _ = decoder.raw_decode(text, start)
         # ValueError covers JSONDecodeError and integers over Python's digit limit;
         # RecursionError covers deeply nested arrays or objects
         except (ValueError, RecursionError):
-            continue
+            pass
+        else:
+            found_object = True
+            if isinstance(obj, dict) and isinstance(items := obj.get("hypotheses"), list):
+                return items
+        start = text.find("{", start + 1)
+    if found_object:
+        raise ProposalParseError('reply has no "hypotheses" list')
     raise ProposalParseError(f"no JSON object found in reply: {text[:200]!r}")
 
 
