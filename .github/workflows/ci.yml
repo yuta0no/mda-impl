@@ -27,6 +27,8 @@ jobs:
           path: ~/.cache/pre-commit
           key: pre-commit-${{ hashFiles('.pre-commit-config.yaml') }}
       - run: uvx pre-commit run --all-files --show-diff-on-failure
+        env:
+          SKIP: ty  # the typecheck job runs it against the locked environment
 
   typecheck:
     name: Type check (ty)
