@@ -2,7 +2,7 @@
 
 This file collects what the MDA paper specifies for the ChemBench experiment, and the defaults we choose where it says nothing. [blueprint.md](./blueprint.md) says which branch implements each part.
 
-Source: [arXiv:2608.09696](https://arxiv.org/abs/2608.09696) **v5**, read from the TeX source. References such as "Alg. 8" or "App. B.2" point to that version. Earlier versions report different settings and results.
+Source: [arXiv:2608.09696](https://arxiv.org/abs/2608.09696) **v5**, read from the TeX source. References such as "Alg. 8" or "App. B.2" point to that version. Section, figure and algorithm numbers were recomputed from that source after dropping its commented-out blocks, so they should match the PDF.
 
 ## 1. Protocol
 
@@ -33,7 +33,7 @@ for k in 1..22:
 
 ## 2. Hypotheses and the seed library
 
-A hypothesis is an algebraic rate law $r_0 = f(C_A, C_I, C_B, C_P, \mathrm{Enz}, T, \mathrm{pH}; \theta)$ whose parameters have names and bounds. This is the JSON format of the proposer prompt, and `mda.hypothesis` already parses and compiles it. The parameter prior is uniform over the declared bounds (App. A.6).
+A hypothesis is an algebraic rate law $r_0 = f(C_A, C_I, C_B, C_P, \mathrm{Enz}, T, \mathrm{pH}; \theta)$ whose parameters have names and bounds. This is the JSON format of the proposer prompt, and `mda.hypothesis` already parses and compiles it. The parameter prior is uniform over the declared bounds (App. A.4).
 
 The seed library is "nine canonical executable laws" (App. B.2). We take these to be the forms of the nine canonical benchmark worlds, which `mda.bench.canonical_worlds()` returns (the benchmark excludes `c4_ph_activity`):
 
@@ -53,7 +53,7 @@ The paper gives no parameter bounds for the seeds; see [D7](#10-where-the-paper-
 
 ## 3. Fitting and model weights
 
-The primary arm uses point estimates and BIC weights. Sources: App. A.8 (BIC approximation, Alg. 8), App. A.10 (Alg. 9), App. B.2.
+The primary arm uses point estimates and BIC weights. Sources: App. A.6.3 (BIC approximation, Alg. 8), App. A.8 (Alg. 9), App. B.2.
 
 - **Point estimate.** $\hat\theta_m = \arg\min_\theta \mathrm{RSS}_m(\theta)$ over the declared bounds, by bounded multistart nonlinear least squares. Every model is refitted on all data at every update.
 - **Whitened residuals.** $\mathrm{RSS}_m(\theta) = \sum_n \big((y_n - \hat y_n(\theta)) / \sigma_n\big)^2$ with $\sigma_n = \max(\rho |y_n|, \sigma_{\mathrm{floor}})$, $\rho = 0.03$, $\sigma_{\mathrm{floor}} = 0.01$.
@@ -67,7 +67,7 @@ The primary arm uses point estimates and BIC weights. Sources: App. A.8 (BIC app
 
 - **Initialisation (Alg. 11).** The pool starts as the 9 seeds plus one LLM call requesting $N_{\mathrm{init}} = 12$ laws, using the prompt without its refining section. Proposals that fail validation are dropped: they do not compile or their bounds are invalid. Exact-expression duplicates are removed, so the initial pool has at most 21 models. If the pool ends up empty, retry within a limit or report failure.
 - **Expansion (Alg. 12).** One LLM call requests $N_{\mathrm{new}} = 6$ "residual-directed" proposals. Its prompt adds the refining section: the forms already in the pool with their median relative residuals, and the inputs the best form's residual correlates with. It also adds the remaining budget and phase. The new candidates are fitted, and the next model-posterior call rescores and prunes the whole pool. After initialisation, this is the only LLM call.
-- **Adaptive cap (Alg. 10; App. B.2, "Adaptive pool size and pruning").** After each update, the cap drops to $N_{\min} = 6$ when two conditions hold: the largest weight exceeds $\tau_c = 0.9$, and the MAP model's median relative fit residual is at most $\tau_{\mathrm{fit}} = 0.05$. The 6 models with the largest weights are kept and the weights renormalised. Otherwise the cap is $N_{\max} = 24$. Raising the cap again does not restore discarded models.
+- **Adaptive cap (Alg. 10; App. B.2, "Adaptive pool size and pruning").** After each update, the cap drops to $N_{\min} = 6$ when two conditions hold: the largest weight exceeds $\tau_c = 0.9$, and the MAP model's median relative fit residual is at most $\tau_{\mathrm{fit}} = 0.05$. The 6 models with the largest weights are kept and the pool is refitted. Otherwise the cap is $N_{\max} = 24$. Raising the cap again does not restore discarded models.
 
 ## 5. Update step
 
@@ -89,17 +89,17 @@ update_state(x, y):
 
 The per-datum relative error is $r_j = |F(y_j) - \hat F(x_j)| / \max(|F(y_j)|, c)$. Then $e^*$ is the median of $r_j$ over the new datum and, with back-testing (on by default), over the stored data. Expansion happens when $e^* > \tau_e$.
 
-In Alg. 13, the new datum is scored prequentially by the fit made before it arrived. The paper notes that the executed ChemBench agent did something else (App. A.10). It gated its first expansion on residuals cached from the preceding fit, then refitted on all data and rechecked if it expanded again. So a surprising observation can trigger expansion one update later.
+In Alg. 13, the new datum is scored prequentially by the fit made before it arrived. The paper notes that the executed ChemBench agent did something else (App. A.8). It gated its first expansion on residuals cached from the preceding fit, then refitted on all data and rechecked if it expanded again. So a surprising observation can trigger expansion one update later.
 
 ## 6. Experiment design
 
-Sources: App. B.2 (the objective $V(a)$) and App. A.11 (Alg. 14).
+Sources: App. B.2 (the objective $V(a)$) and App. A.9 (Alg. 14).
 
 $$V(a) = \sum_m p(m \mid D) \Big(\bar\mu_m(a) - \sum_{m'} p(m' \mid D)\, \bar\mu_{m'}(a)\Big)^2$$
 
 In the BIC arm, $\bar\mu_m(a) = f_m(a; \hat\theta_m)$. $V(a)$ is the model-disagreement surrogate for expected information gain, without the noise whitening.
 
-- **Optimiser.** CMA-ES with 48 objective evaluations per round on the normalised 7-d box. $C_A$, $C_B$ and $\mathrm{Enz}$ are mapped logarithmically and the other inputs linearly, which is what `mda.bench.to_unit` and `from_unit` already do. Batch size is 1, and the pool is refitted before the next design.
+- **Optimiser.** CMA-ES with 48 objective evaluations per round on the normalised 7-d box. The paper says the "concentration and enzyme axes are mapped logarithmically and temperature and pH linearly". `mda.bench.to_unit` and `from_unit` follow the benchmark instead: $C_A$, $C_B$ and $\mathrm{Enz}$ are logarithmic, and $C_I$ and $C_P$ are linear because their lower bound is 0. Batch size is 1, and the pool is refitted before the next design.
 - **Random-design control.** Draw uniformly in the unit box, the same distribution as `World.heldout`.
 
 ## 7. Evaluation and reporting
@@ -108,7 +108,7 @@ Sources: App. B.1, App. B.4, Fig. 2 caption.
 
 - **RMSLE and pass.** `mda.metrics.rmsle` is computed on the benchmark's fixed test grid, `World.heldout(42, 1000)`, the set `evaluate_law` uses. A cell passes when RMSLE < 0.05. A law that cannot be evaluated over the test range counts as a failure.
 - **nMSLE.** `mda.metrics.nmsle` is computed on a held-out query set per (world, seed). The visible text only says that the seed changes the query conditions. A commented-out paragraph of the source gives its size as 60.
-- **Aggregation.** Average over seeds within a world arithmetically, then take the geometric mean over worlds. 95% intervals come from 5,000 world-bootstrap replicates. A paired ratio between two methods averages the paired log-ratios within each world, then bootstraps worlds. Pass rates use all 171 cells, with failures counted.
+- **Aggregation.** For the main curve (Fig. 2a), average over seeds within a world arithmetically, then take the geometric mean over worlds. 95% intervals come from 5,000 world-bootstrap replicates. Pass rates use all 171 cells, with failures counted. The paper reports paired ratios between methods with world-bootstrap intervals, but does not give the estimator; see D19. The controls figure (Fig. 7) aggregates differently: geometric means over worlds and replicates.
 - **Cohort.** The paper's nMSLE curve uses 115 cells in 54 worlds: those where the corrected LLM-AutoSciLab is evaluable at every budget. We do not rerun LLM-AutoSciLab, so we cannot rebuild that cohort. We report nMSLE on the cells where every compared method is finite, and say so.
 
 ## 8. Arms and the paper's numbers
@@ -140,7 +140,7 @@ Each default below is ours. In code, put it in `MDAConfig` with a comment naming
 
 | ID | Open question | Our default | Alternative to keep behind a flag |
 | --- | --- | --- | --- |
-| D1 | Which residual is fitted? App. A.8 whitens raw residuals, but App. B.2 says both arms "fit residuals in log-rate space" | The whitened raw residual $(y - \hat y)/\sigma_n$. With $\rho = 0.03$, it approximates a scaled log-space residual once $\lvert y\rvert \gg 0.3$ | `log1p` residuals |
+| D1 | Which residual is fitted? App. A.6.3 whitens raw residuals, but App. B.2 says both arms "fit residuals in log-rate space" | The whitened raw residual $(y - \hat y)/\sigma_n$. With $\rho = 0.03$, it approximates a scaled log-space residual once $\lvert y\rvert \gg 0.3$ | `log1p` residuals |
 | D2 | Profiled BIC is $-\infty$ when $\mathrm{RSS} = 0$, which happens at $B = 3$ whenever $C_m \ge 3$ | Floor $\mathrm{RSS}/N$ at $10^{-12}$, so the exact fits tie and $C_m \log N$ decides between them | — |
 | D3 | Expansion threshold $\tau_e$ | 0.05, the scale used by $\tau_{\mathrm{fit}}$ and the pass threshold | — |
 | D4 | $R_m$ and $N_e^{\max}$ | $R_m = 1$ and $N_e^{\max} = \infty$: at most 22 expansions per cell, the 23 calls per cell that [api-cost-estimation.md](./api-cost-estimation.md) assumes | — |
@@ -155,16 +155,17 @@ Each default below is ours. In code, put it in `MDAConfig` with a comment naming
 | D13 | What counts as a duplicate | Exact expression after normalising formatting only: strip comments and whitespace, then `ast.unparse(ast.parse(expr))`. Renaming a parameter makes a new expression, as in the paper | — |
 | D14 | Unusable LLM replies (`ProposalParseError`, `stop_reason` of `max_tokens` or `refusal`) | Up to 3 attempts per call, all logged. After that, continue without new candidates; at initialisation, the 9 seeds | — |
 | D15 | Output format | Structured outputs (`output_config.format`) with the hypotheses JSON schema, leaving the prompt text unchanged. `parse_hypotheses` still validates every expression | The plain prompt, as in the paper |
-| D16 | ICL prompts | ICL (+MDA design): the paper's generic ICL forecaster template (App. G, BoxingGym) with the ChemBench world description from `chem_propose.txt`, predicting the 60 queries. ICL (+LLM design): ask for one condition inside the input bounds. After one format-only retry, a malformed reply becomes a random condition. A missing or unparseable forecast counts as a failure | — |
+| D16 | ICL prompts | ICL (+MDA design): the paper's generic ICL forecaster template (App. G.2, BoxingGym) with the ChemBench world description from `chem_propose.txt`, predicting the 60 queries. ICL (+LLM design): ask for one condition inside the input bounds. After one format-only retry, a malformed reply becomes a random condition. A missing or unparseable forecast counts as a failure | — |
 | D17 | Reproducibility of LLM calls | Cache each reply keyed by (arm, world, seed, call index, prompt hash), so a rerun replays the reply instead of querying again | — |
 | D18 | SMC settings not given: target ESS fraction $\eta$, moves per rung $R_p$, rung cap $J_p$ | $\eta = 0.5$, $R_p = 5$, $J_p = 100$. Proposals outside the bounds are rejected. The proposal scale is half the per-coordinate particle standard deviation, floored at $10^{-3}$ before scaling (Alg. 6 caption) | — |
+| D19 | Estimator for paired ratios between two methods | Average the paired log-ratios of the seeds within each world, take the mean over worlds, exponentiate, and bootstrap worlds | Ratio of the two methods' aggregated curves |
 
 ## 11. Inconsistencies and pitfalls in the paper
 
 - **Pass threshold.** The AutoSciLab paper's text says 0.01, but its code and the MDA paper use 0.05 (App. B.1).
-- **Empty initial batch.** In the Fig. 2b storyboard, the pool holds only 9 models until $B = 6$, when five new expressions take it to 14. So all the LLM initialisation proposals can fail validation, and the code must handle an empty batch.
+- **Empty initial batch.** App. B.2 says that in the Fig. 2b storyboard, five new expressions take the pool "from nine to 14" at $B = 6$. A pool of 9 after initialisation suggests that none of the 12 initial proposals survived in that run. This is our reading, not something the paper states, but the code must handle an empty initial batch either way.
 - **SMC bounds.** The paper's NumPy SMC fitter clipped proposals at the bounds. That violates detailed balance (Alg. 6 caption), so our implementation must reject out-of-bounds proposals instead.
-- **Data-dependent bounds.** The proposer chooses bounds after seeing the data, which inflates evidence (App. A.6 footnote). The weights are approximate predictive weights, not calibrated posterior probabilities.
+- **Data-dependent bounds.** The proposer chooses bounds after seeing the data, which inflates evidence (App. A.4 footnote). The weights are approximate predictive weights, not calibrated posterior probabilities.
 - **Near-duplicates.** Exact-expression matching does not merge equivalent laws, so weight can split between near-duplicates (App. B.2).
 - **Baseline bug.** The upstream LLM-AutoSciLab selector compared training scores against validation scores. The paper fixed this for its baseline runs (App. B.3).
 - **Benchmark defects.** The upstream ChemBench defects listed in the [README](../README.md#upstream-code-defects) apply to every arm.

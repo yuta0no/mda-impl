@@ -1,6 +1,6 @@
 # Implementation blueprint
 
-This blueprint lists what remains to reproduce the Model Discovery Agent (MDA) experiment on ChemBench ([arXiv:2608.09696v5](https://arxiv.org/abs/2608.09696), §4.1 and App. B), and which branch implements each part. [chembench-spec.md](./chembench-spec.md) gives the paper's settings and our defaults where the paper is silent (D1–D18); this file refers to it as "spec §n".
+This blueprint lists what remains to reproduce the Model Discovery Agent (MDA) experiment on ChemBench ([arXiv:2608.09696v5](https://arxiv.org/abs/2608.09696), §4.1 and App. B), and which branch implements each part. [chembench-spec.md](./chembench-spec.md) gives the paper's settings and our defaults where the paper is silent (D1–D19); this file refers to it as "spec §n".
 
 **In scope:**
 
@@ -224,7 +224,7 @@ There are three tracks, which can proceed in parallel:
 ### 9. `feat/analysis`
 
 - **Scope.** `mda/analysis.py` and `mda-impl report`:
-  - Load run logs, aggregate (seed mean within world, geometric mean over worlds), 5,000-replicate world-bootstrap CIs, paired ratios, and pass rates over all 171 cells (spec §7).
+  - Load run logs, aggregate (seed mean within world, geometric mean over worlds), 5,000-replicate world-bootstrap CIs, paired ratios (D19), and pass rates over all 171 cells (spec §7).
   - Figures: nMSLE against $B$ per arm (Fig. 2a), the posterior storyboard of one cell (Fig. 2b), fixed vs hybrid (Fig. 6), and CMA-ES vs random for each backend (Fig. 7).
 - **Dependencies.** `uv add matplotlib`, or a `--group analysis` dependency group.
 - **Tests.**
