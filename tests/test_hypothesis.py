@@ -1,5 +1,7 @@
+import json
 import math
 import warnings
+from dataclasses import asdict
 
 import numpy as np
 import pytest
@@ -45,6 +47,17 @@ def test_matches_numpy():
     C_A, Enz, T = X[:, 0], X[:, 4], X[:, 5]
     expected = -0.5 * np.exp(-T / 300) + np.sqrt(C_A) ** 2 - np.log(Enz) / 1.5
     assert np.allclose(compile_hypothesis(h)(np.array([0.5, 1.5]), X), expected)
+
+
+# names and order as listed in src/mda/prompts/chem_propose.txt
+@pytest.mark.parametrize(
+    ("j", "name"), list(enumerate(["C_A", "C_I", "C_B", "C_P", "Enz", "T", "pH"]))
+)
+def test_input_names_map_to_columns(j, name):
+    X = _X()
+    assert np.array_equal(
+        compile_hypothesis(Hypothesis(name="x", expr=name, params=()))(np.array([]), X), X[:, j]
+    )
 
 
 @pytest.mark.parametrize(
@@ -106,6 +119,14 @@ def test_constant_expression_has_shape_n(expr):
     assert y.dtype == np.float64
 
 
+@pytest.mark.parametrize("expr", ["2", "C_A"])
+def test_returns_fresh_writable_array(expr):
+    X = _X()
+    y = compile_hypothesis(Hypothesis("x", expr, ()))(np.array([]), X)
+    assert y.flags.writeable
+    assert not np.shares_memory(y, X)
+
+
 def test_numerical_errors_return_nonfinite_without_warnings():
     h = Hypothesis("bad", "log(C_I - C_I) + 1 / (C_A - C_A) + exp(1000 * T)", ())
     with warnings.catch_warnings():
@@ -128,6 +149,7 @@ def test_wrong_theta_shape_raises():
         "abs(C_A)",
         "exp(C_A, 2)",
         "exp(x=C_A)",
+        "log(C_A, base=10)",  # keyword arguments are rejected even after a positional one
         "exp",
         "C_A if C_A > 1 else 1",
         "C_A % 2",
@@ -141,6 +163,12 @@ def test_wrong_theta_shape_raises():
         "C_A +",
         "# only a comment",
         pytest.param(_HUGE_INT + " * C_A", id="int-too-large-for-float"),
+        # common LLM slips
+        "C_A ^ 2",  # ^ for power
+        "np.exp(C_A)",
+        "ln(C_A)",
+        "C_A > 1",
+        "C_A, C_B",
     ],
 )
 def test_rejects_unsupported_expr(expr):
@@ -148,22 +176,33 @@ def test_rejects_unsupported_expr(expr):
         compile_hypothesis(Hypothesis("bad", expr, ()))
 
 
+_NAME_CLASH = "clashes with an input or function"
+
+
 @pytest.mark.parametrize(
-    "params",
+    ("params", "match"),
     [
-        (Param("k", 0.0, 1.0), Param("k", 0.0, 1.0)),  # duplicate
-        (Param("C_A", 0.0, 1.0),),  # clashes with an input
-        (Param("exp", 0.0, 1.0),),  # clashes with a function
-        (Param("1k", 0.0, 1.0),),  # not an identifier
-        (Param("lambda", 0.0, 1.0),),  # keyword
-        (Param("k", 2.0, 1.0),),  # low > high
-        (Param("k", 0.0, math.inf),),  # non-finite bound
-        (Param("k", 0.0, 1.0), Param("unused", 0.0, 1.0)),  # declared but unused
+        pytest.param(
+            (Param("k", 0.0, 1.0), Param("k", 0.0, 1.0)), "duplicate parameter", id="duplicate"
+        ),
+        pytest.param((Param("C_A", 0.0, 1.0),), _NAME_CLASH, id="clashes-with-input"),
+        pytest.param((Param("exp", 0.0, 1.0),), _NAME_CLASH, id="clashes-with-function"),
+        pytest.param((Param("1k", 0.0, 1.0),), "invalid parameter name", id="not-identifier"),
+        pytest.param((Param("lambda", 0.0, 1.0),), "invalid parameter name", id="keyword"),
+        pytest.param((Param("k", 2.0, 1.0),), "invalid bounds", id="low-above-high"),
+        pytest.param((Param("k", 0.0, math.inf),), "invalid bounds", id="infinite-bound"),
+        pytest.param((Param("k", math.nan, 1.0),), "invalid bounds", id="nan-bound"),
+        pytest.param(
+            (Param("k", 0.0, 1.0), Param("unused", 0.0, 1.0)),
+            r"not used in expr: \['unused'\]",
+            id="declared-but-unused",
+        ),
     ],
 )
-def test_rejects_invalid_params(params):
-    expr = " + ".join(p.name for p in params[:1]) + " * C_A"
-    with pytest.raises(HypothesisError):
+def test_rejects_invalid_params(params, match):
+    # `match` pins the check that fires: most of these exprs would also fail a later check
+    expr = f"{params[0].name} * C_A"
+    with pytest.raises(HypothesisError, match=match):
         compile_hypothesis(Hypothesis("bad", expr, params))
 
 
@@ -206,6 +245,34 @@ def test_parse_accepts_no_params():
     )
     assert hs == [Hypothesis("c", "Enz * C_A", ())]
     assert rejected == []
+
+
+def test_parse_keeps_every_valid_hypothesis():
+    hs = [
+        MM,
+        Hypothesis("first_order", "k * Enz * C_A", (Param("k", 0.1, 10.0),)),
+        Hypothesis("no_params", "Enz * C_A", ()),
+    ]
+    parsed, rejected = parse_hypotheses(json.dumps({"hypotheses": [asdict(h) for h in hs]}))
+    assert len(parsed) == len(hs) and set(parsed) == set(hs)
+    assert rejected == []
+
+
+def test_parse_ignores_extra_keys():
+    text = json.dumps(
+        {
+            "reasoning": "rate rises linearly with substrate",
+            "hypotheses": [
+                {
+                    "name": "lin",
+                    "rationale": "first order in A",
+                    "expr": "k * C_A",
+                    "params": [{"name": "k", "low": 0.1, "high": 10.0, "unit": "1/min"}],
+                }
+            ],
+        }
+    )
+    assert parse_hypotheses(text) == ([Hypothesis("lin", "k * C_A", (Param("k", 0.1, 10.0),))], [])
 
 
 @pytest.mark.parametrize(
