@@ -35,18 +35,18 @@ for k in 1..22:
 
 A hypothesis is an algebraic rate law $r_0 = f(C_A, C_I, C_B, C_P, \mathrm{Enz}, T, \mathrm{pH}; \theta)$ whose parameters have names and bounds. This is the JSON format of the proposer prompt, and `mda.hypothesis` already parses and compiles it. The parameter prior is uniform over the declared bounds (App. A.4).
 
-The seed library is "nine canonical executable laws" (App. B.2). We take these to be the forms of the nine canonical benchmark worlds, which `mda.bench.canonical_worlds()` returns (the benchmark excludes `c4_ph_activity`):
+The seed library is "nine canonical executable laws" (App. B.2). We take these to be the forms of the nine canonical benchmark worlds, which `mda.bench.canonical_worlds()` returns (the benchmark excludes `c4_ph_activity`). Parameter names are those of the vendored oracle, so fitted values compare with a world's constants by name:
 
 | Seed | `expr` |
 | --- | --- |
 | Michaelis–Menten | `kcat*Enz*C_A/(Km + C_A)` |
 | Competitive inhibition | `kcat*Enz*C_A/(Km*(1 + C_I/Ki) + C_A)` |
 | Product inhibition | `kcat*Enz*C_A/(Km*(1 + C_P/Kp) + C_A)` |
-| Arrhenius | `kcat*exp(-Ea/8.314*(1/T - 1/310))*Enz*C_A/(Km + C_A)` |
+| Arrhenius | `kcat_ref*exp(-Ea/8.314*(1/T - 1/310))*Enz*C_A/(Km + C_A)` |
 | Ping-pong bisubstrate | `kcat*Enz*C_A*C_B/(KmA*C_B + KmB*C_A + C_A*C_B)` |
 | Uncompetitive inhibition | `kcat*Enz*C_A/(Km + C_A*(1 + C_I/Ki))` |
 | Substrate inhibition | `kcat*Enz*C_A/(Km + C_A + C_A**2/Ki)` |
-| Hill | `kcat*Enz*C_A**n/(K**n + C_A**n)` |
+| Hill | `kcat*Enz*C_A**n/(K_half**n + C_A**n)` |
 | Noncompetitive inhibition | `kcat*Enz*C_A/((1 + C_I/Ki)*(Km + C_A))` |
 
 The paper gives no parameter bounds for the seeds; see [D7](#10-where-the-paper-is-silent).
@@ -146,7 +146,7 @@ Each default below is ours. In code, put it in `MDAConfig` with a comment naming
 | D4 | $R_m$ and $N_e^{\max}$ | $R_m = 1$ and $N_e^{\max} = \infty$: at most 22 expansions per cell, the 23 calls per cell that [api-cost-estimation.md](./api-cost-estimation.md) assumes | — |
 | D5 | Which predictive-check variant, which target $F$, and which floor $c$? | The variant the executed ChemBench agent used: cached residuals from the preceding fit. Relative error on the raw rate ($F(y) = y$) with $c = 0.01$ | The prequential variant of Alg. 13 |
 | D6 | Prompt fields the template leaves open | Residual list: each pool form with its in-sample median relative residual. Correlation hint: the one or two inputs with the largest absolute Spearman correlation between the MAP model's signed residual and the input in unit coordinates. Budget: $K - k$. Phase: `refine` if the MAP model's median relative residual is at most $\tau_{\mathrm{fit}}$, otherwise `explore` | Omit the phase line, which the template marks as optional |
-| D7 | Seed-law parameter bounds | Set from physical scales and the input box, not from the worlds' constants: `kcat` $[10^{-3}, 10^{3}]$; `Km`, `Ki`, `Kp`, `KmA`, `KmB`, `K` $[10^{-3}, 10^{3}]$ mM; `n` $[0.1, 8]$; `Ea` $[10^{3}, 2 \times 10^{5}]$ J/mol. A test then checks, without tuning, that the nine canonical worlds' constants fall inside | — |
+| D7 | Seed-law parameter bounds | Set from physical scales and the input box, not from the worlds' constants: `kcat` and `kcat_ref` $[10^{-3}, 10^{3}]$; `Km`, `Ki`, `Kp`, `KmA`, `KmB`, `K_half` $[10^{-3}, 10^{3}]$ mM; `n` $[0.1, 8]$; `Ea` $[10^{3}, 2 \times 10^{5}]$ J/mol. A test then checks, without tuning, that the nine canonical worlds' constants fall inside | — |
 | D8 | Multistart settings | `scipy.optimize.least_squares` (`method="trf"`) with bounds. Parameters whose bounds span more than two decades are optimised in log space. 8 starts drawn from the bounds, plus a warm start from the previous step's $\hat\theta$. The RNG is seeded by (cell seed, step) | — |
 | D9 | In which space is $V(a)$ computed? | Raw rate, as written in App. B.2 | $\log(1 + y)$, which weights low-rate regions more |
 | D10 | CMA-ES settings | pycma with mean at the box centre, $\sigma_0 = 0.3$, default population size (9 in 7-d) and bounds $[0, 1]^7$, stopped after exactly 48 evaluations. Return the best point evaluated, not the final mean | — |
