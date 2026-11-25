@@ -13,6 +13,7 @@ from mda.hypothesis import (
     Param,
     ProposalParseError,
     compile_hypothesis,
+    normalise_expr,
     parse_hypotheses,
 )
 from mda.metrics import rmsle
@@ -107,6 +108,43 @@ def test_comments_are_ignored(expr):
     params = (Param("k", 0.0, 10.0),)
     expected = compile_hypothesis(Hypothesis("ref", "k * C_A + C_B", params))(theta, X)
     assert np.array_equal(compile_hypothesis(Hypothesis("c", expr, params))(theta, X), expected)
+
+
+@pytest.mark.parametrize(
+    "expr",
+    [
+        "kcat*Enz*C_A/(Km+C_A)",
+        "  kcat * Enz\t* C_A\r\n/ ( Km + C_A )\n",
+        "kcat * Enz * C_A  # Michaelis-Menten\n/ (Km + C_A)",
+        "((kcat * Enz) * C_A) / ((Km) + C_A)",
+    ],
+    ids=["no-spaces", "whitespace", "comment", "redundant-parentheses"],
+)
+def test_normalise_expr_ignores_formatting(expr):
+    assert normalise_expr(expr) == normalise_expr(MM.expr)
+
+
+def test_normalise_expr_ignores_number_spelling():
+    assert normalise_expr("1e3 * C_A") == normalise_expr("1000.0 * C_A")
+    assert normalise_expr(".5 * C_A") == normalise_expr("0.50 * C_A")
+
+
+def test_normalise_expr_keeps_other_differences():
+    exprs = [
+        MM.expr,
+        "Vmax * Enz * C_A / (Km + C_A)",  # a renamed parameter (D13)
+        "kcat * Enz * C_A / (C_A + Km)",  # reordered operands
+        "kcat * (Enz * C_A) / (Km + C_A)",  # parentheses that change the grouping
+        "kcat * Enz * C_A / (Km + C_A) * 1.0",
+        "kcat * Enz * C_A / (Km + C_A) * 1",  # an int is not the float above
+    ]
+    assert len({normalise_expr(e) for e in exprs}) == len(exprs)
+
+
+@pytest.mark.parametrize("expr", ["", "C_A +", "# only a comment", "C_A = 1", "(C_A"])
+def test_normalise_expr_rejects_unparseable(expr):
+    with pytest.raises(HypothesisError):
+        normalise_expr(expr)
 
 
 @pytest.mark.parametrize("expr", ["2", "k", "k * 2"])

@@ -77,12 +77,7 @@ def compile_hypothesis(h: Hypothesis) -> Model:
     """
     params = _check_params(h.params)
     try:
-        # Drop comments, then collapse whitespace so line breaks outside brackets parse. Safe
-        # because the grammar has no string literals: `#` always starts a comment, which ends at
-        # its line break, and joining with a space never merges two tokens. Comments must go
-        # first, or collapsing would let a comment swallow the lines after it.
-        code = " ".join(line.partition("#")[0] for line in h.expr.splitlines())
-        tree = ast.parse(" ".join(code.split()), mode="eval")
+        tree = _parse(h.expr)
         used: set[str] = set()
         root = _build(tree.body, {n: j for j, n in enumerate(INPUT_NAMES)}, params, used)
     except HypothesisError:
@@ -103,6 +98,30 @@ def compile_hypothesis(h: Hypothesis) -> Model:
         return np.broadcast_to(y, (X.shape[0],)).copy()
 
     return f
+
+
+def normalise_expr(expr: str) -> str:
+    """`expr` with its formatting normalised: the key of exact-expression dedupe (D13).
+
+    Two expressions get the same key when they differ only in whitespace, line breaks, `#`
+    comments, redundant parentheses or the spelling of a number (`1e3` and `1000.0`). Anything
+    else makes a new expression: a renamed parameter, reordered operands, or `2` against `2.0`.
+    Raises `HypothesisError` when `expr` does not parse; the key says nothing about whether it
+    compiles.
+    """
+    try:
+        return ast.unparse(_parse(expr))
+    except (SyntaxError, ValueError, OverflowError, RecursionError, MemoryError) as e:
+        raise HypothesisError(f"cannot parse expr {expr!r}: {e}") from e
+
+
+def _parse(expr: str) -> ast.Expression:
+    # Drop comments, then collapse whitespace so line breaks outside brackets parse. Safe because
+    # the grammar has no string literals: `#` always starts a comment, which ends at its line
+    # break, and joining with a space never merges two tokens. Comments must go first, or
+    # collapsing would let a comment swallow the lines after it.
+    code = " ".join(line.partition("#")[0] for line in expr.splitlines())
+    return ast.parse(" ".join(code.split()), mode="eval")
 
 
 def _check_params(params: Params) -> dict[str, int]:
