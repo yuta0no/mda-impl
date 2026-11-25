@@ -17,7 +17,7 @@ This blueprint lists what remains to reproduce the Model Discovery Agent (MDA) e
 
 ## Current state
 
-This is `main` with `feat/fit` merged.
+This is `main` with `feat/fit` and `feat/library` merged.
 
 | Module | Contents | Merged in |
 | --- | --- | --- |
@@ -26,6 +26,7 @@ This is `main` with `feat/fit` merged.
 | `mda.arrays` | jaxtyping aliases | `feat/chembench` (#1) |
 | `mda.hypothesis` | `Hypothesis`, `Param`, `Model`, `compile_hypothesis`, `parse_hypotheses` | `feat/hypothesis` (#4), `feat/fit` (#8) |
 | `mda.fit` | `fit` and `FitResult`, `sigma`, `residuals`, `relative_residuals`, `residual_input_spearman` | `feat/fit` (#8) |
+| `mda.library` | `SEED_LIBRARY`, the 9 seed laws with the D7 bounds, and `SEED_BY_WORLD`, mapping each canonical world to its seed | `feat/library` (#9) |
 | `prompts/chem_propose.txt` | The proposer prompt, verbatim from App. G.1 | — |
 | CI | pre-commit, ty, and pytest on Python 3.12 and 3.13 | `dev/ci` (#2), `dev/ty` (#3) |
 | Tooling | ty as a pre-commit hook, and the Development section of the README | `dev/ty-precommit` (#5) |
@@ -34,8 +35,7 @@ This is `main` with `feat/fit` merged.
 
 ```text
 src/mda/
-  bench.py, metrics.py, arrays.py, hypothesis.py, fit.py   done
-  library.py    feat/library      the 9 canonical seed laws with bounds
+  bench.py, metrics.py, arrays.py, hypothesis.py, fit.py, library.py   done
   pool.py       feat/posterior    Candidate and Pool: fitted hypotheses, dedupe, refit, diagnostics
   posterior.py  feat/posterior    BIC (profiled and fixed scale), weights, top-N pruning, adaptive cap
   design.py     feat/design       V(a), CMA-ES and random design
@@ -71,7 +71,7 @@ flowchart LR
 ```mermaid
 flowchart TD
     main(["main"]) --> fit["feat/fit (done)"]
-    fit --> library["feat/library"]
+    fit --> library["feat/library (done)"]
     fit --> posterior["feat/posterior"]
     main --> design["feat/design"]
     main --> llmc["feat/llm-client"]
@@ -94,14 +94,14 @@ flowchart TD
 
 There are three tracks, which can proceed in parallel:
 
-- **Numerics:** `feat/fit` (done) → `feat/library` and `feat/posterior`, with `feat/design` alongside → `feat/agent` → `feat/runner`. `feat/library` and `feat/posterior` can start now.
+- **Numerics:** `feat/fit` and `feat/library` (done) → `feat/posterior`, with `feat/design` alongside → `feat/agent` → `feat/runner`. `feat/posterior` can start now.
 - **LLM:** `feat/llm-client` can start now. `feat/proposer` waits for `feat/agent`.
 - **Evaluation:** `feat/analysis`, `feat/icl` and `feat/smc` start once the run-log schema from `feat/agent` is fixed.
 
 | # | Branch | Scope | Depends on | Milestone |
 | --- | --- | --- | --- | --- |
 | 1 | `feat/fit` (done) | Bounded multistart least squares and residual diagnostics | main | M1 |
-| 2 | `feat/library` | The 9 canonical seed laws | `feat/fit` | M1 |
+| 2 | `feat/library` (done) | The 9 canonical seed laws | `feat/fit` | M1 |
 | 3 | `feat/posterior` | Pool, BIC, weights, pruning, adaptive cap | `feat/fit` | M1 |
 | 4 | `feat/design` | $V(a)$, CMA-ES, random design | main | M1 |
 | 5 | `feat/agent` | MDA agent loop, predictive check, one-cell runner | 2, 3, 4 | M1 |
@@ -134,13 +134,17 @@ There are three tracks, which can proceed in parallel:
   - Linear-space parameters raise no warnings, and caller errors raise instead of returning `ok=False`.
 - **Measured.** A seed law fits on 25 points in tens of milliseconds: about 40 ms at the median, with 8 random starts and a warm start.
 
-### 2. `feat/library`
+### 2. `feat/library` (done)
 
-- **Scope.** `mda/library.py`: `SEED_LIBRARY`, a tuple of the 9 `Hypothesis` objects in spec §2 with the bounds of D7.
-- **Tests.**
+- **Scope.** `mda/library.py`, as built:
+  - `SEED_LIBRARY`: a tuple of the 9 `Hypothesis` objects in spec §2, with the D7 bounds as module constants (`KCAT`, `K_MM`, `HILL_N`, `EA`).
+  - `SEED_BY_WORLD`: a read-only mapping from each canonical world ID to its seed, in the order of `canonical_worlds()`.
+  - The parameter names are the vendored oracle's, so fitted values compare with a world's constants by name.
+- **Tests.** `tests/test_library.py`:
   - All 9 compile, and their names and expressions are unique.
   - Each canonical world's `v0`/medium constants fall within the bounds. This checks the bounds; it is not used to tune them.
-  - Fitting each seed to 25 noiseless `World.truth` points gives RMSLE < 0.05 on `heldout(42, 1000)`.
+  - Each seed at its world's constants reproduces `World.truth`.
+  - Fitting each seed to 25 noiseless `World.truth` points (8 random starts) gives RMSLE < 0.05 on `heldout(42, 1000)`.
 - **Done when** the fixed-library arm can represent all 9 canonical worlds.
 
 ### 3. `feat/posterior`
