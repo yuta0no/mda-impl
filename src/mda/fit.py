@@ -1,0 +1,166 @@
+"""Point estimates for one hypothesis: bounded multistart least squares (spec §3, D1, D8).
+
+`fit` computes the point estimate in the BIC approximation (App. A.6.3, Alg. 8):
+theta_hat = argmin RSS(theta) over the declared bounds. `relative_residuals` feeds the predictive
+check (Alg. 13, D5) and the adaptive cap (Alg. 10), and `residual_input_spearman` the correlation
+hint of the expansion prompt (Alg. 12, D6).
+"""
+
+import warnings
+from dataclasses import dataclass
+from typing import Literal
+
+import numpy as np
+from jaxtyping import Float
+from scipy.optimize import least_squares
+from scipy.stats import ConstantInputWarning, spearmanr
+
+from mda.arrays import Conditions, Rates, Theta
+from mda.bench import INPUT_NAMES
+from mda.hypothesis import Hypothesis, Model, compile_hypothesis
+
+RHO = 0.03  # relative noise scale of the whitening (spec §3, App. A.6.3)
+SIGMA_FLOOR = 0.01  # absolute floor of the whitening scale (spec §3, App. A.6.3)
+REL_FLOOR = 0.01  # floor c of the relative residual (D5)
+LOG_SPAN = 100.0  # bounds spanning more than two decades are optimised in log space (D8)
+
+# Inside the optimiser, non-finite residuals become this value and larger ones are clipped to it,
+# so a step into a region where the model overflows is rejected instead of aborting the start or
+# overflowing scipy's internal dot products. Final RSS values are never penalised.
+_PENALTY = 1e8
+
+type Residual = Literal["whitened", "log1p"]
+
+
+@dataclass(frozen=True)
+class FitResult:
+    theta: Theta  # within the declared bounds, in natural (not log) units; (theta hat in the paper)
+    rss: float  # inf when no start gave finite residuals
+    y_hat: Rates  # predictions at theta on the fitted X; may be non-finite when not ok
+    ok: bool
+
+
+def sigma(y: Rates, rho: float = RHO, sigma_floor: float = SIGMA_FLOOR) -> Rates:
+    """Whitening scale sigma_n = max(rho |y_n|, sigma_floor) (eq. 46, spec §3)."""
+    return np.maximum(rho * np.abs(y), sigma_floor)
+
+
+def residuals(y: Rates, y_hat: Rates, residual: Residual = "whitened") -> Rates:
+    """Residuals whose sum of squares is the RSS (D1).
+
+    `whitened` (default): (y - y_hat) / sigma(y). `log1p`: log1p(y) - log1p(y_hat), which is
+    non-finite when y_hat <= -1.
+    """
+    with np.errstate(all="ignore"):
+        if residual == "whitened":
+            return (y - y_hat) / sigma(y)
+        if residual == "log1p":
+            return np.log1p(y) - np.log1p(y_hat)
+    raise ValueError(f"unknown residual {residual!r}")
+
+
+def fit(
+    h: Hypothesis,
+    X: Conditions,
+    y: Rates,
+    *,
+    rng: np.random.Generator,
+    n_starts: int,
+    warm_start: Theta | None = None,
+    residual: Residual = "whitened",
+    f: Model | None = None,
+) -> FitResult:
+    """Minimise the RSS of `h` on (X, y) within the bounds of `h.params` (spec §3, D8).
+
+    Runs `scipy.optimize.least_squares(method="trf")` from the warm start (clipped into the
+    bounds), if given, and from `n_starts` points drawn uniformly from the bounds, and keeps the
+    start with the smallest RSS; ties go to the earlier start, so the warm start wins them. All
+    random starts are drawn before any optimisation, so the result depends only on `rng`'s state.
+
+    Parameters with `low > 0` and `high / low > LOG_SPAN` are optimised, and drawn, in log space.
+    Parameters with `low == high` are held fixed. `f` is `compile_hypothesis(h)`; pass it to
+    avoid recompiling.
+
+    Never raises for numerical problems: if no start reaches finite residuals, the result has
+    `ok=False` and `rss=inf`. Raises `ValueError` when there is nothing to start from.
+    """
+    if f is None:
+        f = compile_hypothesis(h)
+    lo = np.array([p.low for p in h.params], dtype=float)
+    hi = np.array([p.high for p in h.params], dtype=float)
+    free = lo < hi
+    log = free & (lo > 0) & (hi > LOG_SPAN * lo)
+    with np.errstate(divide="ignore"):
+        z_lo = np.where(log, np.log(lo), lo)[free]
+        z_hi = np.where(log, np.log(hi), hi)[free]
+    log_free = log[free]
+
+    def to_theta(z: np.ndarray) -> np.ndarray:
+        theta = lo.copy()
+        theta[free] = np.where(log_free, np.exp(z), z)
+        return np.clip(theta, lo, hi)
+
+    def evaluate(theta: np.ndarray) -> tuple[np.ndarray, float]:
+        y_hat = f(theta, X)
+        with np.errstate(over="ignore"):
+            rss = float(np.sum(residuals(y, y_hat, residual) ** 2))
+        return y_hat, rss if np.isfinite(rss) else np.inf
+
+    if not free.any():
+        theta = lo.copy()
+        y_hat, rss = evaluate(theta)
+        return FitResult(theta, rss, y_hat, bool(np.isfinite(rss)))
+
+    starts: list[np.ndarray] = []
+    if warm_start is not None:
+        if warm_start.shape != lo.shape:
+            raise ValueError(f"warm_start has shape {warm_start.shape}, expected {lo.shape}")
+        w = np.clip(np.where(np.isfinite(warm_start), warm_start, lo), lo, hi)[free]
+        with np.errstate(divide="ignore"):
+            starts.append(np.where(log_free, np.log(w), w))
+    starts.extend(rng.uniform(z_lo, z_hi, size=(n_starts, len(z_lo))))
+    if not starts:
+        raise ValueError("no starts: pass n_starts > 0 or a warm_start")
+
+    def fun(z: np.ndarray) -> np.ndarray:
+        r = residuals(y, f(to_theta(z), X), residual)
+        return np.clip(np.where(np.isfinite(r), r, _PENALTY), -_PENALTY, _PENALTY)
+
+    best: FitResult | None = None
+    for z0 in starts:
+        try:
+            sol = least_squares(fun, z0, bounds=(z_lo, z_hi), method="trf")
+        except (ValueError, np.linalg.LinAlgError):
+            continue
+        theta = to_theta(sol.x)
+        y_hat, rss = evaluate(theta)
+        if best is None or rss < best.rss:
+            best = FitResult(theta, rss, y_hat, bool(np.isfinite(rss)))
+    if best is None:  # every start raised
+        theta = to_theta(starts[0])
+        return FitResult(theta, np.inf, f(theta, X), False)
+    return best
+
+
+def relative_residuals(y: Rates, y_hat: Rates, c: float = REL_FLOOR) -> Rates:
+    """Per-datum relative error |y - y_hat| / max(|y|, c), with F(y) = y (D5)."""
+    with np.errstate(all="ignore"):
+        return np.abs(y - y_hat) / np.maximum(np.abs(y), c)
+
+
+def residual_input_spearman(X: Conditions, y: Rates, y_hat: Rates) -> Float[np.ndarray, "7"]:
+    """Spearman correlation between the signed residual y - y_hat and each input (D6).
+
+    Values are in the order of `INPUT_NAMES`. D6 asks for inputs in `to_unit` coordinates; that
+    map is monotone in each input, so it leaves a rank correlation unchanged and is not applied.
+    The value is 0 for an input or a residual that is constant over the data, which includes
+    fewer than two points. All values are NaN when any residual is non-finite.
+    """
+    r = y - y_hat
+    if not np.all(np.isfinite(r)):
+        return np.full(len(INPUT_NAMES), np.nan)
+    with warnings.catch_warnings():
+        # Constant inputs are routine (6 of 7 on D0); spearmanr returns NaN for them, mapped to 0
+        warnings.simplefilter("ignore", ConstantInputWarning)
+        rho = np.array([spearmanr(X[:, j], r).statistic for j in range(X.shape[1])])
+    return np.where(np.isfinite(rho), rho, 0.0)

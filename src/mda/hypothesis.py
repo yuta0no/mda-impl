@@ -21,6 +21,9 @@ class Param:
 
 type Params = tuple[Param, ...]
 
+# A compiled hypothesis f(theta, X) -> rates, as returned by `compile_hypothesis`
+type Model = Callable[[Theta, Conditions], Rates]
+
 
 @dataclass(frozen=True)
 class Hypothesis:
@@ -60,7 +63,7 @@ _UNARY_OPS: dict[type[ast.unaryop], Callable[[Any], Any]] = {
 type _Node = Callable[[np.ndarray, np.ndarray], np.ndarray | float]
 
 
-def compile_hypothesis(h: Hypothesis) -> Callable[[Theta, Conditions], Rates]:
+def compile_hypothesis(h: Hypothesis) -> Model:
     """Compile `h.expr` into a vectorised function `f(theta, X) -> rates`.
 
     Allowed syntax: numbers, `+`, `-`, `*`, `/`, `**`, unary `-`/`+`, and calls to `exp`, `log`, `sqrt`.
