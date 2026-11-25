@@ -26,7 +26,7 @@ This is `main` with `feat/fit` and `feat/library` merged.
 | `mda.arrays` | jaxtyping aliases | `feat/chembench` (#1) |
 | `mda.hypothesis` | `Hypothesis`, `Param`, `Model`, `compile_hypothesis`, `parse_hypotheses` | `feat/hypothesis` (#4), `feat/fit` (#8) |
 | `mda.fit` | `fit` and `FitResult`, `sigma`, `residuals`, `relative_residuals`, `residual_input_spearman` | `feat/fit` (#8) |
-| `mda.library` | `SEED_LIBRARY`, the 9 seed laws with the D7 bounds, and `SEED_BY_WORLD`, mapping each canonical world to its seed | `feat/library` |
+| `mda.library` | `SEED_LIBRARY`, the 9 seed laws with the D7 bounds, and `SEED_BY_WORLD`, mapping each canonical world to its seed | `feat/library` (#9) |
 | `prompts/chem_propose.txt` | The proposer prompt, verbatim from App. G.1 | — |
 | CI | pre-commit, ty, and pytest on Python 3.12 and 3.13 | `dev/ci` (#2), `dev/ty` (#3) |
 | Tooling | ty as a pre-commit hook, and the Development section of the README | `dev/ty-precommit` (#5) |
