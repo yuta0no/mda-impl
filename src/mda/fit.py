@@ -25,9 +25,14 @@ REL_FLOOR = 0.01  # floor c of the relative residual (D5)
 LOG_SPAN = 100.0  # bounds spanning more than two decades are optimised in log space (D8)
 
 # Inside the optimiser, non-finite residuals become this value and larger ones are clipped to it,
-# so a step into a region where the model overflows is rejected instead of aborting the start or
-# overflowing scipy's internal dot products. Final RSS values are never penalised.
-_PENALTY = 1e8
+# so a step into a region where the model overflows is rejected instead of aborting the start.
+# It must be far above any meaningful residual: clipping flattens the objective, and a start on
+# the plateau has zero gradient and stops where it began (a cap of 1e8 left half the random
+# starts of an Arrhenius law stuck, 1e20 a fifth). It must also stay well below 1e43: at the edge
+# of a non-finite region the finite-difference Jacobian is about cap / 1e-8, and scipy's
+# trust-region solver raises its singular values to the sixth power, which then overflows.
+# Final RSS values are never penalised.
+_PENALTY = 1e30
 
 type Residual = Literal["whitened", "log1p"]
 

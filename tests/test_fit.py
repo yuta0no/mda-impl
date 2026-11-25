@@ -143,6 +143,25 @@ def test_partly_non_finite_region_is_avoided():
     assert res.theta[0] == pytest.approx(20.0, rel=1e-5)
 
 
+@pytest.mark.parametrize("seed", range(5))
+def test_huge_finite_residuals_keep_their_gradient(seed):
+    # Residuals up to 1e12: a low penalty cap would flatten them and stop the fit at its start
+    h = Hypothesis("huge", "1e10 * k", (Param("k", 0.0, 1.0),))
+    res = run(h, D0, np.zeros(3), seed=seed, n_starts=1)
+    assert res.theta[0] == pytest.approx(0.0, abs=1e-12)
+
+
+def test_arrhenius_single_starts_mostly_converge():
+    h = Hypothesis(
+        "arrhenius",
+        "A * exp(-Ea / (8.314 * T)) * C_A / (Km + C_A)",
+        (Param("A", 1e-3, 1e30), Param("Ea", 1e3, 2e5), Param("Km", 1e-3, 1e3)),
+    )
+    X, y = data(h, np.array([1e9, 5e4, 0.7]))
+    rss = np.array([run(h, X, y, seed=s, n_starts=1).rss for s in range(20)])
+    assert np.mean(rss < 1e-6) >= 0.75  # about 0.5 with a penalty cap of 1e8
+
+
 def test_random_starts_rescue_a_stuck_warm_start():
     # Every residual is nan at the warm start, where k < C_A everywhere, so that start cannot move
     h = Hypothesis("partial", "log(k - C_A)", (Param("k", 0.0, 200.0),))
