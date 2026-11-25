@@ -82,23 +82,28 @@ def fit(
     avoid recompiling.
 
     Never raises for numerical problems: if no start reaches finite residuals, the result has
-    `ok=False` and `rss=inf`. Raises `ValueError` when there is nothing to start from.
+    `ok=False` and `rss=inf`. Caller errors raise `ValueError`: nothing to start from, a
+    `warm_start` of the wrong shape, an unknown `residual`, or shapes that do not broadcast.
     """
     if f is None:
         f = compile_hypothesis(h)
     lo = np.array([p.low for p in h.params], dtype=float)
     hi = np.array([p.high for p in h.params], dtype=float)
     free = lo < hi
-    log = free & (lo > 0) & (hi > LOG_SPAN * lo)
-    with np.errstate(divide="ignore"):
-        z_lo = np.where(log, np.log(lo), lo)[free]
-        z_hi = np.where(log, np.log(hi), hi)[free]
-    log_free = log[free]
+    log_free = (free & (lo > 0) & (hi > LOG_SPAN * lo))[free]
+
+    # The optimiser works on z: the log of a log-space parameter, the value itself otherwise.
+    # Only the log-space entries go through log and exp, because a linear-space bound can be zero
+    # or negative and a linear-space value can exceed the point where exp overflows.
+    def to_z(theta_free: np.ndarray) -> np.ndarray:
+        return np.where(log_free, np.log(np.where(log_free, theta_free, 1.0)), theta_free)
 
     def to_theta(z: np.ndarray) -> np.ndarray:
         theta = lo.copy()
-        theta[free] = np.where(log_free, np.exp(z), z)
+        theta[free] = np.where(log_free, np.exp(np.where(log_free, z, 0.0)), z)
         return np.clip(theta, lo, hi)
+
+    z_lo, z_hi = to_z(lo[free]), to_z(hi[free])
 
     def evaluate(theta: np.ndarray) -> tuple[np.ndarray, float]:
         y_hat = f(theta, X)
@@ -116,8 +121,7 @@ def fit(
         if warm_start.shape != lo.shape:
             raise ValueError(f"warm_start has shape {warm_start.shape}, expected {lo.shape}")
         w = np.clip(np.where(np.isfinite(warm_start), warm_start, lo), lo, hi)[free]
-        with np.errstate(divide="ignore"):
-            starts.append(np.where(log_free, np.log(w), w))
+        starts.append(to_z(w))
     starts.extend(rng.uniform(z_lo, z_hi, size=(n_starts, len(z_lo))))
     if not starts:
         raise ValueError("no starts: pass n_starts > 0 or a warm_start")
@@ -125,6 +129,11 @@ def fit(
     def fun(z: np.ndarray) -> np.ndarray:
         r = residuals(y, f(to_theta(z), X), residual)
         return np.clip(np.where(np.isfinite(r), r, _PENALTY), -_PENALTY, _PENALTY)
+
+    # Numerical problems never raise in `fun`, so whatever does is a caller error, such as an
+    # unknown residual or shapes that do not broadcast. Evaluate once outside the try below,
+    # which would otherwise report it as a failed fit.
+    fun(starts[0])
 
     best: FitResult | None = None
     for z0 in starts:

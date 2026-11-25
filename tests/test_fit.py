@@ -1,3 +1,5 @@
+import subprocess
+import sys
 import time
 
 import numpy as np
@@ -141,6 +143,27 @@ def test_partly_non_finite_region_is_avoided():
     assert res.theta[0] == pytest.approx(20.0, rel=1e-5)
 
 
+def test_random_starts_rescue_a_stuck_warm_start():
+    # Every residual is nan at the warm start, where k < C_A everywhere, so that start cannot move
+    h = Hypothesis("partial", "log(k - C_A)", (Param("k", 0.0, 200.0),))
+    X = conditions(15)
+    X[:, CA] = np.linspace(0.1, 5.0, 15)
+    y = np.log(20.0 - X[:, CA])
+    warm = np.array([0.05])
+    assert not run(h, X, y, n_starts=0, warm_start=warm).ok
+    res = run(h, X, y, warm_start=warm)
+    assert res.ok
+    assert res.theta[0] == pytest.approx(20.0, rel=1e-5)
+
+
+def test_ties_go_to_the_warm_start():
+    # No start gives finite residuals, so all tie at rss = inf and the first start is kept
+    h = Hypothesis("bad", "k * log(C_I - 100)", (Param("k", 0.1, 10.0),))
+    res = run(h, conditions(10), np.ones(10), warm_start=np.array([5.0]))
+    assert not res.ok
+    assert res.theta[0] == pytest.approx(5.0)
+
+
 def test_deterministic_for_a_given_rng():
     X, y = data(HILL, HILL_TRUE)
     y = y * np.exp(np.random.default_rng(1).normal(0.0, 0.3, size=y.shape))
@@ -197,6 +220,28 @@ def test_no_starts_raises():
         run(MM, X, y, n_starts=0)
 
 
+def test_caller_errors_raise_without_runtime_type_checks():
+    # pytest type-checks every call into mda, which hides these errors; a production run does
+    # not. They must raise, not come back as a failed fit.
+    code = """
+import numpy as np
+from mda.fit import fit
+from mda.hypothesis import Hypothesis, Param
+
+h = Hypothesis("mm", "V * C_A / (K + C_A)", (Param("V", 1e-3, 1e3), Param("K", 1e-3, 1e3)))
+X = np.ones((5, 7))
+for kwargs in ({"y": np.ones(5), "residual": "bogus"}, {"y": np.ones(4)}):
+    try:
+        fit(h, X, rng=np.random.default_rng(0), n_starts=2, **kwargs)
+        print("returned")
+    except ValueError:
+        print("raised")
+"""
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=False)
+    assert out.returncode == 0, out.stderr
+    assert out.stdout.split() == ["raised", "raised"]
+
+
 def test_fixed_parameter_is_held():
     h = Hypothesis("mm", MM.expr, (Param("Vmax", 1e-3, 1e3), Param("Km", 0.7, 0.7)))
     X, y = data(MM, MM_TRUE)
@@ -215,13 +260,41 @@ def test_all_parameters_fixed_just_evaluates():
 
 
 def test_wide_bounds_reach_small_values():
-    # Km = 1e-4 sits six decades below the upper bound; log space makes it reachable
+    # Km = 1e-4 sits seven decades below the upper bound and is still recovered
     h = Hypothesis("mm", MM.expr, (Param("Vmax", 1e-3, 1e3), Param("Km", 1e-6, 1e3)))
     X = D0.copy()
     X[:, CA] = [1e-2, 3e-4, 1e-4]  # below the benchmark's C_A bound, to make Km identifiable
     y = compile_hypothesis(h)(np.array([2.5, 1e-4]), X)
     res = run(h, X, y)
     np.testing.assert_allclose(res.theta, [2.5, 1e-4], rtol=1e-4)
+
+
+def test_wide_bounds_are_drawn_in_log_space():
+    # j does not affect the predictions, so the fitted j is the start that was drawn for it
+    h = Hypothesis("flat", FLAT.expr, (Param("k", 0.1, 10.0), Param("j", 1e-6, 1e6)))
+    X = conditions(10)
+    y = 2.0 * X[:, CA]
+    j = np.array([run(h, X, y, seed=s, n_starts=1).theta[1] for s in range(20)])
+    # Log-uniform draws fall on both sides of 1; uniform draws would all be far above it
+    assert np.sum(j < 1.0) >= 5
+    assert np.sum(j > 1.0) >= 5
+
+
+@pytest.mark.filterwarnings("error::RuntimeWarning")
+def test_linear_space_parameters_do_not_warn():
+    # Neither Ea nor b spans more than two decades, so both stay in linear space. b has a
+    # negative bound, and Ea is far beyond the point where exp overflows.
+    h = Hypothesis(
+        "linear",
+        "k * exp(-Ea / 8.314 * (1 / T - 1 / 310)) * C_A + b",
+        (Param("k", 1e-3, 1e3), Param("Ea", 1e4, 1e5), Param("b", -5.0, 5.0)),
+    )
+    X = conditions(25)
+    truth = np.array([2.0, 5e4, -1.0])
+    y = compile_hypothesis(h)(truth, X)
+    res = run(h, X, y, warm_start=np.array([1.0, 2e4, -2.0]))
+    assert res.ok
+    np.testing.assert_allclose(res.theta, truth, rtol=1e-4)
 
 
 @pytest.mark.parametrize("residual", ["whitened", "log1p"])
