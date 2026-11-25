@@ -17,25 +17,24 @@ This blueprint lists what remains to reproduce the Model Discovery Agent (MDA) e
 
 ## Current state
 
-This is `main` at `a3e4f88`.
+This is `main` with `feat/fit` merged.
 
 | Module | Contents | Merged in |
 | --- | --- | --- |
 | `mda.bench` | `World` (`observe`, `truth`, `heldout`), `to_unit` and `from_unit`, benchmark constants | `feat/chembench` (#1) |
 | `mda.metrics` | `rmsle`, `nmsle`, `passed` | `feat/chembench` (#1) |
 | `mda.arrays` | jaxtyping aliases | `feat/chembench` (#1) |
-| `mda.hypothesis` | `Hypothesis`, `Param`, `compile_hypothesis`, `parse_hypotheses` | `feat/hypothesis` (#4) |
+| `mda.hypothesis` | `Hypothesis`, `Param`, `Model`, `compile_hypothesis`, `parse_hypotheses` | `feat/hypothesis` (#4), `feat/fit` (#8) |
+| `mda.fit` | `fit` and `FitResult`, `sigma`, `residuals`, `relative_residuals`, `residual_input_spearman` | `feat/fit` (#8) |
 | `prompts/chem_propose.txt` | The proposer prompt, verbatim from App. G.1 | — |
 | CI | pre-commit, ty, and pytest on Python 3.12 and 3.13 | `dev/ci` (#2), `dev/ty` (#3) |
-
-`dev/ty-precommit` is not merged yet. It adds ty to pre-commit and a Development section to the README.
+| Tooling | ty as a pre-commit hook, and the Development section of the README | `dev/ty-precommit` (#5) |
 
 ## Target layout
 
 ```text
 src/mda/
-  bench.py, metrics.py, arrays.py, hypothesis.py   done
-  fit.py        feat/fit          whitening, bounded multistart least squares, residual diagnostics
+  bench.py, metrics.py, arrays.py, hypothesis.py, fit.py   done
   library.py    feat/library      the 9 canonical seed laws with bounds
   pool.py       feat/posterior    Candidate and Pool: fitted hypotheses, dedupe, refit, diagnostics
   posterior.py  feat/posterior    BIC (profiled and fixed scale), weights, top-N pruning, adaptive cap
@@ -71,7 +70,7 @@ flowchart LR
 
 ```mermaid
 flowchart TD
-    main(["main"]) --> fit["feat/fit"]
+    main(["main"]) --> fit["feat/fit (done)"]
     fit --> library["feat/library"]
     fit --> posterior["feat/posterior"]
     main --> design["feat/design"]
@@ -95,13 +94,13 @@ flowchart TD
 
 There are three tracks, which can proceed in parallel:
 
-- **Numerics:** `feat/fit` → `feat/library` and `feat/posterior`, with `feat/design` alongside → `feat/agent` → `feat/runner`.
+- **Numerics:** `feat/fit` (done) → `feat/library` and `feat/posterior`, with `feat/design` alongside → `feat/agent` → `feat/runner`. `feat/library` and `feat/posterior` can start now.
 - **LLM:** `feat/llm-client` can start now. `feat/proposer` waits for `feat/agent`.
 - **Evaluation:** `feat/analysis`, `feat/icl` and `feat/smc` start once the run-log schema from `feat/agent` is fixed.
 
 | # | Branch | Scope | Depends on | Milestone |
 | --- | --- | --- | --- | --- |
-| 1 | `feat/fit` | Bounded multistart least squares and residual diagnostics | main | M1 |
+| 1 | `feat/fit` (done) | Bounded multistart least squares and residual diagnostics | main | M1 |
 | 2 | `feat/library` | The 9 canonical seed laws | `feat/fit` | M1 |
 | 3 | `feat/posterior` | Pool, BIC, weights, pruning, adaptive cap | `feat/fit` | M1 |
 | 4 | `feat/design` | $V(a)$, CMA-ES, random design | main | M1 |
@@ -114,21 +113,26 @@ There are three tracks, which can proceed in parallel:
 | 11 | `feat/smc` | Tempered-SMC control | 3, 4 | M3 |
 | 12 | `exp/chembench` | Frozen configs, full runs, results write-up | 8, 9, 10, 11 | M4 |
 
-### 1. `feat/fit`
+### 1. `feat/fit` (done)
 
-- **Scope.** `mda/fit.py`:
+- **Scope.** `mda/fit.py`, as built:
   - `sigma(y)`: the whitening scale $\max(0.03\lvert y\rvert, 0.01)$.
-  - `fit(h, X, y, *, rng, n_starts, warm_start, residual)` → `FitResult(theta, rss, y_hat, ok)`, using bounded multistart `scipy.optimize.least_squares` with log-space parameters for wide bounds (spec §3, D1, D8).
+  - `residuals(y, y_hat, residual)`: the residuals whose squares sum to the RSS, `"whitened"` by default or `"log1p"` (D1).
+  - `fit(h, X, y, *, rng, n_starts, warm_start, residual, f)` → `FitResult(theta, rss, y_hat, ok)`, using bounded multistart `scipy.optimize.least_squares` (spec §3, D8). A parameter with `low > 0` whose bounds span more than two decades is optimised, and its starts are drawn, in log space. One with `low == high` is held fixed. `f` takes an already compiled hypothesis, so that a refit does not compile it again.
   - `relative_residuals(y, y_hat, c)` (D5).
-  - The residual–input Spearman correlation used in the prompt (D6).
-- **Dependencies.** `uv add scipy`.
-- **Tests.**
+  - `residual_input_spearman(X, y, y_hat)`: the residual–input Spearman correlations used in the prompt (D6), one per input in the order of `INPUT_NAMES`. A correlation is 0 when the input or the residual is constant, and all seven are NaN when any residual is non-finite.
+  - `Model`, the type of a compiled hypothesis, added to `mda/hypothesis.py`.
+- **Constants.** $\rho$, $\sigma_{\mathrm{floor}}$, $c$ and the two-decade threshold are module constants of `mda/fit.py` (`RHO`, `SIGMA_FLOOR`, `REL_FLOOR`, `LOG_SPAN`) until `feat/agent` adds `MDAConfig`.
+- **Dependencies.** `scipy`, added with `uv add`.
+- **Tests.** `tests/test_fit.py` covers the five cases planned for this branch, then the starts and the error handling:
   - Recovers known constants from noiseless Michaelis–Menten and Hill data.
   - Never leaves the bounds.
   - Non-finite predictions give `ok=False` and `rss=inf` instead of raising.
   - Deterministic for a given RNG; a warm start is used when given.
   - The all-zero $D_0$ of the activator worlds (`c67`, `c78`, `c92`) does not crash.
-- **Done when** a hypothesis fits on up to 25 points in milliseconds, with every documented edge case covered by a test.
+  - Starts for wide bounds are drawn in log space, random starts rescue a stuck warm start, and ties go to the warm start.
+  - Linear-space parameters raise no warnings, and caller errors raise instead of returning `ok=False`.
+- **Measured.** A seed law fits on 25 points in tens of milliseconds: about 40 ms at the median, with 8 random starts and a warm start.
 
 ### 2. `feat/library`
 
@@ -171,7 +175,7 @@ There are three tracks, which can proceed in parallel:
 ### 5. `feat/agent`
 
 - **Scope.**
-  - `mda/config.py`: `MDAConfig`, one dataclass with every value in spec §1–6 and D1–D15. Each field has a comment citing the paper or a D-number.
+  - `mda/config.py`: `MDAConfig`, one dataclass with every value in spec §1–6 and D1–D15. Each field has a comment citing the paper or a D-number. It takes over `RHO`, `SIGMA_FLOOR`, `REL_FLOOR` and `LOG_SPAN` from `mda/fit.py`. `fit` and `residuals` do not yet accept $\rho$, $\sigma_{\mathrm{floor}}$ or the threshold as arguments, so they change here too.
   - `mda/propose.py`: the `Proposer` protocol, `propose(kind, pool, D, budget_left) -> list[Hypothesis]`, plus `NullProposer`.
   - `mda/agent.py`: `MDAAgent` implementing Alg. 2, with the predictive check (both variants, D5), $R_m$ and $N_e^{\max}$ gating (D4), adaptive cap and pruning, a current-data MAP `get_model`, and a plug-in `get_predictor`.
   - `mda/run.py`: `run_cell(world, seed, config, proposer) -> RunLog` (Alg. 1). It evaluates RMSLE on the 1000-point grid, nMSLE on the 60-point query set (D11) and pass, at every $B$ from 3 to 25. The JSON run log records, per step: $x$, $y$, $e^*$, whether the pool expanded, the cap, and a pool snapshot (expression, $\hat\theta$, RSS, BIC, weight, origin), plus the LLM call IDs.
@@ -279,10 +283,10 @@ The paper's numbers come from GPT-5.6-Luna, and ours from Claude Haiku 5.5, so m
 - **Commits.** Messages start with `add:`, `update:`, `fix:` or `rm:`, as in the existing history.
 - **Hyperparameters.** Every hyperparameter lives in `MDAConfig`, never inline, with a comment citing the paper location or a D-number from the spec. When a default changes, update the spec in the same PR.
 - **Tests.** Tests never call the Claude API; use `FakeLLM` or a fake `Proposer`. Array-typed functions use the jaxtyping aliases in `mda.arrays`, so pytest checks shapes at run time.
-- **Dependencies.** Add them with `uv add`, in the branch that first needs them: `scipy` (`feat/fit`), `cma` (`feat/design`), `matplotlib` (`feat/analysis`).
+- **Dependencies.** Add them with `uv add`, in the branch that first needs them: `scipy` (`feat/fit`, added), `cma` (`feat/design`), `matplotlib` (`feat/analysis`).
 - **Vendored code.** `src/mda/_vendor` stays identical to upstream.
 
 ## Cost and compute
 
 - **API.** The hybrid arm makes at most 23 proposer calls per cell (1 at initialisation and up to 22 expansions, D4), over 171 cells. The estimate in [api-cost-estimation.md](./api-cost-estimation.md) stands until the M2 pilot replaces it with measured usage. Only the fixed-library arm makes no calls. The random-design, fixed-scale-BIC and SMC controls make their own expansion calls; the paper's fixed-scale arms reuse the paired arm's initialisation reply (Fig. 7 caption) instead of making a new call.
-- **CPU.** Each update refits at most 24 models with 9 starts each (8 random starts and a warm start) on at most 25 points, and runs 48 CMA-ES evaluations of $V(a)$. This is cheap, so parallelise across cells, not within them. SMC costs about 100 particles × rungs × moves per model per update, which is why the paper limits it to a 12-world cohort (D12).
+- **CPU.** Each update refits at most 24 models with 9 starts each (8 random starts and a warm start) on at most 25 points, and runs 48 CMA-ES evaluations of $V(a)$. A seed law fits in about 40 ms, so refitting a full pool takes about a second, and longer when the laws have more parameters. This is cheap, so parallelise across cells, not within them. SMC costs about 100 particles × rungs × moves per model per update, which is why the paper limits it to a 12-world cohort (D12).
