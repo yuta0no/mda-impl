@@ -85,10 +85,11 @@ class Pool:
         added: list[Candidate] = []
         for h in hypotheses:
             key = normalise_expr(h.expr)
+            compiled = compile_hypothesis(h)
             if key in keys:
                 continue
             keys.add(key)
-            added.append(Candidate(h, compile_hypothesis(h), key, origin, added_at))
+            added.append(Candidate(h, compiled, key, origin, added_at))
         self._candidates.extend(added)
         return added
 
