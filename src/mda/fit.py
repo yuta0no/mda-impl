@@ -37,6 +37,12 @@ class FitResult:
     y_hat: Rates  # predictions at theta on the fitted X; may be non-finite when not ok
     ok: bool
 
+    def __post_init__(self) -> None:
+        # A result is shared by reference (a candidate, a warm start, a snapshot of the pool),
+        # so its arrays are marked read-only
+        self.theta.setflags(write=False)
+        self.y_hat.setflags(write=False)
+
 
 def sigma(y: Rates, rho: float = DEFAULTS.rho, sigma_floor: float = DEFAULTS.sigma_floor) -> Rates:
     """Whitening scale sigma_n = max(rho |y_n|, sigma_floor) (eq. 46, spec §3)."""

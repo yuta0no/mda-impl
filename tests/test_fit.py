@@ -187,6 +187,17 @@ def test_deterministic_for_a_given_rng():
     assert a.rss == b.rss
 
 
+def test_result_arrays_are_read_only():
+    # A result is shared by reference, e.g. by every snapshot of a pool
+    X, y = data(MM, MM_TRUE)
+    fixed = Hypothesis("mm", MM.expr, (Param("Vmax", 2.5, 2.5), Param("Km", 0.7, 0.7)))
+    for res in (run(MM, X, y), run(fixed, X, y, n_starts=0)):
+        with pytest.raises(ValueError, match="read-only"):
+            res.theta[0] = 1.0
+        with pytest.raises(ValueError, match="read-only"):
+            res.y_hat[0] = 1.0
+
+
 def test_warm_start_is_the_initial_point():
     X, y = data(HILL, HILL_TRUE)
     warm = np.array([3.0, 2.0, 1.7])
