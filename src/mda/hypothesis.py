@@ -42,6 +42,43 @@ class ProposalParseError(ValueError):
     """Raised when an LLM reply contains no `{"hypotheses": [...]}` object at all."""
 
 
+def _object(properties: dict[str, Any]) -> dict[str, Any]:
+    # Structured outputs require every object to list its required keys and forbid extra ones
+    return {
+        "type": "object",
+        "properties": properties,
+        "required": list(properties),
+        "additionalProperties": False,
+    }
+
+
+# The reply format of `src/mda/prompts/chem_propose.txt` as a JSON schema, for structured outputs
+# (D15). The schema only fixes the shape; `parse_hypotheses` still validates every hypothesis
+HYPOTHESES_SCHEMA: dict[str, Any] = _object(
+    {
+        "hypotheses": {
+            "type": "array",
+            "items": _object(
+                {
+                    "name": {"type": "string"},
+                    "expr": {"type": "string"},
+                    "params": {
+                        "type": "array",
+                        "items": _object(
+                            {
+                                "name": {"type": "string"},
+                                "low": {"type": "number"},
+                                "high": {"type": "number"},
+                            }
+                        ),
+                    },
+                }
+            ),
+        }
+    }
+)
+
+
 FUNCTIONS: dict[str, Callable[[Any], Any]] = {
     "exp": np.exp,
     "log": np.log,

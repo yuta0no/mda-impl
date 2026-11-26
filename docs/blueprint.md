@@ -17,7 +17,7 @@ This blueprint lists what remains to reproduce the Model Discovery Agent (MDA) e
 
 ## Current state
 
-This is `main` with `feat/fit`, `feat/library`, `feat/posterior` and `feat/design` merged.
+This is `main` with `feat/fit`, `feat/library`, `feat/posterior`, `feat/design` and `feat/llm-client` merged.
 
 | Module | Contents | Merged in |
 | --- | --- | --- |
@@ -30,6 +30,8 @@ This is `main` with `feat/fit`, `feat/library`, `feat/posterior` and `feat/desig
 | `mda.pool` | `Candidate`, `Origin` and `Pool`: `add` with exact-expression dedupe, `refit`, `keep`, and the per-model arrays `rss`, `n_free` and `fit_err` | `feat/posterior` |
 | `mda.posterior` | `bic_profiled`, `bic_fixed`, `log_prior`, `log_weights`, `weights`, `prune_top`, `adaptive_cap` | `feat/posterior` |
 | `mda.design` | `between_model_variance`, `cma_design`, `random_design` | `feat/design` |
+| `mda.llm` | `LLMClient` (the provider-neutral base), `ClaudeLLM`, `FakeLLM`, `Reply`, `StopReason`, `Usage`, `Pricing`, `ReplyCache`; `HYPOTHESES_SCHEMA` in `mda.hypothesis` | `feat/llm-client` |
+| `tools/llm_check.py` | Counts proposer-prompt tokens, or makes one real call | `feat/llm-client` |
 | `prompts/chem_propose.txt` | The proposer prompt, verbatim from App. G.1 | — |
 | CI | pre-commit, ty, and pytest on Python 3.12 and 3.13 | `dev/ci` (#2), `dev/ty` (#3) |
 | Tooling | ty as a pre-commit hook, and the Development section of the README | `dev/ty-precommit` (#5) |
@@ -44,7 +46,7 @@ src/mda/
   agent.py      feat/agent        MDAAgent: init, design, update_state, get_model, get_predictor (Alg. 2)
   propose.py    feat/agent        Proposer protocol and NullProposer
                 feat/proposer     LLMProposer: prompt rendering, parse, dedupe, retry
-  llm.py        feat/llm-client   Claude client wrapper, reply cache, transcripts, usage and cost
+  llm.py        feat/llm-client   LLM clients, reply cache, transcripts, usage and cost (done)
   run.py        feat/agent        run_cell: Alg. 1 for one (world, seed), with a JSON run log
                 feat/runner       grid over worlds × seeds × arms, CLI, resume, manifest
   smc.py        feat/smc          tempered-SMC evidence (control arm)
@@ -75,7 +77,7 @@ flowchart TD
     fit --> library["feat/library (done)"]
     fit --> posterior["feat/posterior (done)"]
     main --> design["feat/design (done)"]
-    main --> llmc["feat/llm-client"]
+    main --> llmc["feat/llm-client (done)"]
     library --> agent["feat/agent"]
     posterior --> agent
     design --> agent
@@ -96,7 +98,7 @@ flowchart TD
 There are three tracks, which can proceed in parallel:
 
 - **Numerics:** `feat/fit`, `feat/library`, `feat/posterior` and `feat/design` (done) → `feat/agent` → `feat/runner`.
-- **LLM:** `feat/llm-client` can start now. `feat/proposer` waits for `feat/agent`.
+- **LLM:** `feat/llm-client` (done). `feat/proposer` waits for `feat/agent`.
 - **Evaluation:** `feat/analysis`, `feat/icl` and `feat/smc` start once the run-log schema from `feat/agent` is fixed.
 
 | # | Branch | Scope | Depends on | Milestone |
@@ -107,7 +109,7 @@ There are three tracks, which can proceed in parallel:
 | 4 | `feat/design` (done) | $V(a)$, CMA-ES, random design | main | M1 |
 | 5 | `feat/agent` | MDA agent loop, predictive check, one-cell runner | 2, 3, 4 | M1 |
 | 6 | `feat/runner` | Grid runner, CLI, arm configs | 5 | M1 |
-| 7 | `feat/llm-client` | Claude wrapper, reply cache, cost accounting | main | M2 |
+| 7 | `feat/llm-client` (done) | LLM clients, reply cache, cost accounting | main | M2 |
 | 8 | `feat/proposer` | LLM proposer and the hybrid arm | 5, 7 | M2 |
 | 9 | `feat/analysis` | Aggregation, bootstrap, figures | 6 | M3 |
 | 10 | `feat/icl` | ICL baselines | 6, 7 | M3 |
@@ -223,25 +225,41 @@ There are three tracks, which can proceed in parallel:
   - Each arm config loads.
 - **Done when** milestone M1 is reached (below).
 
-### 7. `feat/llm-client`
+### 7. `feat/llm-client` (done)
 
-- **Scope.** `mda/llm.py`:
-  - `LLMClient.complete(system, user, *, schema=None) -> Reply(text, usage, stop_reason, request_id)` on the Anthropic SDK: `claude-haiku-5-5` with `output_config={"effort": "medium"}`, plus an optional structured-output schema (D15).
-  - An on-disk reply cache (D17) and JSONL transcripts.
-  - Usage-to-cost accounting, and a `FakeLLM` for tests.
-  - The official `count_tokens` measurement for the proposer prompt, which closes the TODO in [api-cost-estimation.md](./api-cost-estimation.md).
-- **Tests.**
-  - A cache hit makes no network call.
-  - `max_tokens` and `refusal` stop reasons are surfaced.
-  - Cost arithmetic.
-  - No test calls the real API.
-- **Done when** a single real call made by hand succeeds and is cached.
+- **Scope.** As built, in `mda/llm.py`:
+  - `LLMClient`, an abstract base class, so that other providers (GPT, a local model) can be added later as subclasses. A subclass sets `provider`, implements `_send(Request) -> Reply` and `model`, adds its generation settings to `settings()`, and may implement `count_tokens`. A subclass missing any of the first three fails when it is constructed. The base class provides the rest for every provider:
+    - `complete(system, user, *, schema=None, call_id=None) -> Reply`. A `Reply` has `text`, `stop_reason`, `usage`, `model`, `request_id`, `stop_detail`, `cost` and `cached`. A reply replayed from the cache has `cached=True` and keeps the usage and cost of the call that produced it.
+    - `StopReason` maps each provider's stop reasons onto `END_TURN`, `MAX_TOKENS`, `REFUSAL` and `OTHER`. `Reply.ok` is false for all but `END_TURN`. Unusable replies are returned, not raised: handling them (D14) is the caller's job. Failed requests raise `LLMError`.
+    - The reply cache (D17), `ReplyCache`: `<cache_dir>/<call_id>/<hash>.json`, where the hash covers the provider settings (model, effort, `max_tokens`) and the request (system, user, schema). Only calls with a `call_id` are cached. A `call_id` is `/`-separated segments of letters, digits, `_`, `-` and `.`; anything else raises `ValueError`, with or without a cache. Entries are written atomically, and unusable replies are cached too, so a rerun replays the same sequence of attempts.
+    - JSONL transcripts, with one line per call, cache hits included. A line has `time`, `call_id`, `settings`, `request`, `reply` and `latency_s`; a cache entry has the same `settings`, `request` and `reply`. A failed request leaves no line.
+    - Running totals `usage`, `cost`, `n_sent` and `n_cached`. Cache hits cost nothing.
+    - A client can be shared between threads: the totals and the transcript stay consistent, and concurrent calls for the same cache entry send only once, the others waiting for that reply. Calls for different entries run in parallel.
+    - A client cannot be pickled, so with multiprocessing (`feat/runner`) each worker builds its own. Workers can share a cache directory, and each should write its own transcript. Nothing stops two processes from sending the same call at the same time, so the runner must give each cell, and so each `call_id`, to one worker.
+  - `ClaudeLLM`: the Messages API, `claude-haiku-5-5` at `effort="medium"` with adaptive thinking, and `output_config.format` when a schema is given (D15). There is no temperature (spec §9). It joins the text blocks and skips thinking blocks, and `count_tokens` uses the free endpoint.
+  - `Pricing` and `Rates`, with Haiku 5.5's two rate cards (\$0.10 / \$0.50 per MTok, or \$0.50 / \$2.50 for prompts over 100K tokens) and cache multipliers of 1.25x for writes and 0.1x for reads.
+  - `FakeLLM`: scripted replies (texts, full `Reply` objects or exceptions), or a function of the request. It records the requests that reach it.
+  - `HYPOTHESES_SCHEMA` in `mda/hypothesis.py`: the `chem_propose.txt` reply format as a structured-output JSON schema.
+- **Constants.** `DEFAULT_MODEL`, `DEFAULT_EFFORT`, `DEFAULT_MAX_TOKENS` (16,000, thinking included; non-streaming requests must stay under the SDK's limit of about 21K) and `DEFAULT_MAX_RETRIES` (5: SDK retries with exponential backoff) are module constants of `mda/llm.py` until `feat/agent` adds `MDAConfig`.
+- **Tests.** `tests/test_llm.py` runs `ClaudeLLM` against an `httpx2.MockTransport`, so the real SDK builds the requests and parses the replies, and no test calls the API:
+  - The base class through a third backend defined in the test file, written as a new provider's would be: it gets the cache, the transcript and the totals, and its own setting enters the cache key.
+  - A cache hit makes no network call, including from a new client as in a rerun. A cached reply equals the original in every field but `cached`. The system prompt, user prompt, schema, call ID, model, effort and `max_tokens` are each part of the key. Errors are not cached, and a corrupt entry is a miss.
+  - The cache key of a fixed request is pinned to a fixed value, so a change that would orphan existing caches fails a test. The contents of a cache entry and of a transcript line are checked field by field.
+  - `max_tokens`, `refusal` (with its category and explanation, either of which the API can leave out) and other stop reasons are surfaced. HTTP errors and connection failures raise `LLMError`, which keeps the API's message and the SDK's exception as its cause.
+  - Cost arithmetic, including the long-prompt tier and the client totals, which stay exact when threads share a client.
+  - Threads making the same call send it once, a waiting call sends its own if the first one fails, and calls for different cache entries are in flight together.
+  - The whole request body, for `complete` and for `count_tokens`: the model, `max_tokens`, the effort, the schema in `output_config.format`, and nothing else, so no sampling parameters. A model other than the default reaches both requests.
+  - The fake API's replies are validated against the SDK's own `Message` type, so a hand-written reply cannot drift from the real shape unnoticed.
+  - A reply that follows `HYPOTHESES_SCHEMA` is one that `parse_hypotheses` accepts.
+- **Measured.** With `tools/llm_check.py`, the initialisation prompt is 504 tokens and the largest expansion prompt 3,512 (929 and 3,937 with the schema); see [api-cost-estimation.md](./api-cost-estimation.md). One real initialisation call returned 12 valid hypotheses with 0 rejected, using 2,711 output tokens and costing \$0.0015. Run again, it was replayed from the cache.
+- **Done when** a single real call made by hand succeeds and is cached. Done.
 
 ### 8. `feat/proposer`
 
 - **Scope.** `LLMProposer` in `mda/propose.py`:
   - Renders the init and expand prompts. The template follows `chem_propose.txt`: the init prompt has no refining section, and the expand prompt adds the refining section and the budget/phase line, filled in as described in D6.
   - Then `parse_hypotheses`, dedupe against the pool, and a cap at $N$ (12 at init, 6 per expansion), with the retry policy of D14.
+  - Calls `LLMClient.complete` with `schema=HYPOTHESES_SCHEMA` and a `call_id` per attempt, such as `<arm>/<world>/s<seed>/call<k>/try<a>`. Each retry needs a new `call_id`, because the cache would replay the unusable reply for the same one. The run log records the `call_id` and `request_id` of every attempt.
   - Wiring for the `hybrid` arm.
 - **Tests.**
   - Snapshot tests of the rendered prompts.

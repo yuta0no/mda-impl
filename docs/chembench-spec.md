@@ -132,7 +132,7 @@ Table 1 reports MDA's RMSLE at $B = 15$ on three worlds: 0.002 (Michaelis–Ment
 ## 9. LLM
 
 - **Paper.** GPT-5.6-Luna at medium reasoning effort. Temperature and the number of samples are not stated.
-- **Ours.** Claude Haiku 5.5 (`claude-haiku-5-5`) at medium effort, as decided in [api-cost-estimation.md](./api-cost-estimation.md). Haiku 5.5 rejects non-default sampling parameters, so we set no temperature, and the effort is set explicitly.
+- **Ours.** Claude Haiku 5.5 (`claude-haiku-5-5`) at medium effort, as decided in [api-cost-estimation.md](./api-cost-estimation.md). Haiku 5.5 rejects non-default sampling parameters, so we set no temperature, and the effort is set explicitly. Adaptive thinking is on (Haiku 5.5's default), and `max_tokens` is 16,000, which includes the thinking tokens. Replies use structured outputs (D15).
 - **Prompt.** [`src/mda/prompts/chem_propose.txt`](../src/mda/prompts/chem_propose.txt) is App. G.1, verbatim. The paper has no ChemBench prompt for the ICL baselines.
 
 ## 10. Where the paper is silent
@@ -157,7 +157,7 @@ Each default below is ours. In code, put it in `MDAConfig` with a comment naming
 | D14 | Unusable LLM replies (`ProposalParseError`, `stop_reason` of `max_tokens` or `refusal`) | Up to 3 attempts per call, all logged. After that, continue without new candidates; at initialisation, the 9 seeds | — |
 | D15 | Output format | Structured outputs (`output_config.format`) with the hypotheses JSON schema, leaving the prompt text unchanged. `parse_hypotheses` still validates every expression | The plain prompt, as in the paper |
 | D16 | ICL prompts | ICL (+MDA design): the paper's generic ICL forecaster template (App. G.2, BoxingGym) with the ChemBench world description from `chem_propose.txt`, predicting the 60 queries. ICL (+LLM design): ask for one condition inside the input bounds. After one format-only retry, a malformed reply becomes a random condition. A missing or unparseable forecast counts as a failure | — |
-| D17 | Reproducibility of LLM calls | Cache each reply keyed by (arm, world, seed, call index, prompt hash), so a rerun replays the reply instead of querying again | — |
+| D17 | Reproducibility of LLM calls | Cache each reply keyed by (arm, world, seed, call index, attempt, hash of the prompt and the model settings), so a rerun replays the reply instead of querying again. The attempt is in the key so that a D14 retry is a new query, not a replay of the unusable reply | — |
 | D18 | SMC settings not given: target ESS fraction $\eta$, moves per rung $R_p$, rung cap $J_p$ | $\eta = 0.5$, $R_p = 5$, $J_p = 100$. Proposals outside the bounds are rejected. The proposal scale is half the per-coordinate particle standard deviation, floored at $10^{-3}$ before scaling (Alg. 6 caption) | — |
 | D19 | Estimator for paired ratios between two methods | Average the paired log-ratios of the seeds within each world, take the mean over worlds, exponentiate, and bootstrap worlds | Ratio of the two methods' aggregated curves |
 | D20 | Does a parameter whose bounds coincide count towards $C_m$? | No. $C_m$ counts the free parameters, those with `low < high`. The fit holds a parameter with `low == high` fixed, so it adds no flexibility to penalise | — |
