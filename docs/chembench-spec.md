@@ -101,6 +101,7 @@ In the BIC arm, $\bar\mu_m(a) = f_m(a; \hat\theta_m)$. $V(a)$ is the model-disag
 
 - **Optimiser.** CMA-ES with 48 objective evaluations per round on the normalised 7-d box. The paper says the "concentration and enzyme axes are mapped logarithmically and temperature and pH linearly". `mda.bench.to_unit` and `from_unit` follow the benchmark instead: $C_A$, $C_B$ and $\mathrm{Enz}$ are logarithmic, and $C_I$ and $C_P$ are linear because their lower bound is 0. Batch size is 1, and the pool is refitted before the next design.
 - **Random-design control.** Draw uniformly in the unit box, the same distribution as `World.heldout`.
+- **Non-finite predictions.** The paper does not say how $V(a)$ treats them. Models with weight 0 are left out of $V(a)$, so a pruned or unfittable model cannot affect it. $V(a)$ is undefined where a model with positive weight predicts a non-finite value, or where the predictions are so large that $V(a)$ overflows. CMA-ES ranks such a point below every other and never returns it. If $V(a)$ is undefined at all 48 points, the design step raises `DesignError`, and the agent falls back to a random design and records it in the run log.
 
 ## 7. Evaluation and reporting
 
@@ -149,7 +150,7 @@ Each default below is ours. In code, put it in `MDAConfig` with a comment naming
 | D7 | Seed-law parameter bounds | Set from physical scales and the input box, not from the worlds' constants: `kcat` and `kcat_ref` $[10^{-3}, 10^{3}]$; `Km`, `Ki`, `Kp`, `KmA`, `KmB`, `K_half` $[10^{-3}, 10^{3}]$ mM; `n` $[0.1, 8]$; `Ea` $[10^{3}, 2 \times 10^{5}]$ J/mol. A test then checks, without tuning, that the nine canonical worlds' constants fall inside | — |
 | D8 | Multistart settings | `scipy.optimize.least_squares` (`method="trf"`) with bounds. Parameters whose bounds span more than two decades are optimised in log space. 8 starts drawn from the bounds, plus a warm start from the previous step's $\hat\theta$. The RNG is seeded by (cell seed, step) | — |
 | D9 | In which space is $V(a)$ computed? | Raw rate, as written in App. B.2 | $\log(1 + y)$, which weights low-rate regions more |
-| D10 | CMA-ES settings | pycma with mean at the box centre, $\sigma_0 = 0.3$, default population size (9 in 7-d) and bounds $[0, 1]^7$, stopped after exactly 48 evaluations. Return the best point evaluated, not the final mean | — |
+| D10 | CMA-ES settings | pycma with mean at the box centre, $\sigma_0 = 0.3$, default population size (9 in 7-d) and bounds $[0, 1]^7$, stopped after exactly 48 evaluations: 5 generations of 9 and 3 points of a sixth, ignoring pycma's own termination criteria. Return the best point evaluated, not the final mean | — |
 | D11 | Query-set seeding | 60 conditions from `World.heldout`, seeded from (world, seed) with `zlib.crc32` (not the salted `hash`). All arms share them, and the seed is independent of the fitting and design RNG | — |
 | D12 | The 12 control worlds are not named | Run the controls on all 57 worlds if compute allows. Otherwise, fix a list of 12 in a config file before running | — |
 | D13 | What counts as a duplicate | Exact expression after normalising formatting only: strip comments and whitespace, then `ast.unparse(ast.parse(expr))`. Renaming a parameter makes a new expression, as in the paper | — |

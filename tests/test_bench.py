@@ -58,6 +58,16 @@ def test_from_unit_clips_to_bounds():
     assert np.all(X >= LO) and np.all(X <= HI)  # exact, not allclose
 
 
+def test_heldout_is_from_unit_of_uniform_draws():
+    # World.heldout draws each axis in turn; from_unit of the same uniform draws must give it.
+    # mda.design.random_design is from_unit of uniform draws too, so it samples this distribution.
+    n = 100
+    rng = np.random.default_rng(1)
+    U = np.stack([rng.uniform(size=n) for _ in range(7)], axis=1)
+    X = World(WorldSpec("c0_michaelis_menten")).heldout(seed=1, n=n)
+    np.testing.assert_allclose(from_unit(U), X, rtol=1e-12)
+
+
 @pytest.mark.parametrize("shape", [(7,), (5, 7), (3, 5, 7)])
 def test_shapes(shape):
     U = np.full(shape, 0.3)

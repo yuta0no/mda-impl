@@ -17,7 +17,7 @@ This blueprint lists what remains to reproduce the Model Discovery Agent (MDA) e
 
 ## Current state
 
-This is `main` with `feat/fit`, `feat/library` and `feat/posterior` merged.
+This is `main` with `feat/fit`, `feat/library`, `feat/posterior` and `feat/design` merged.
 
 | Module | Contents | Merged in |
 | --- | --- | --- |
@@ -29,6 +29,7 @@ This is `main` with `feat/fit`, `feat/library` and `feat/posterior` merged.
 | `mda.library` | `SEED_LIBRARY`, the 9 seed laws with the D7 bounds, and `SEED_BY_WORLD`, mapping each canonical world to its seed | `feat/library` (#9) |
 | `mda.pool` | `Candidate`, `Origin` and `Pool`: `add` with exact-expression dedupe, `refit`, `keep`, and the per-model arrays `rss`, `n_free` and `fit_err` | `feat/posterior` |
 | `mda.posterior` | `bic_profiled`, `bic_fixed`, `log_prior`, `log_weights`, `weights`, `prune_top`, `adaptive_cap` | `feat/posterior` |
+| `mda.design` | `between_model_variance`, `cma_design`, `random_design` | `feat/design` |
 | `prompts/chem_propose.txt` | The proposer prompt, verbatim from App. G.1 | — |
 | CI | pre-commit, ty, and pytest on Python 3.12 and 3.13 | `dev/ci` (#2), `dev/ty` (#3) |
 | Tooling | ty as a pre-commit hook, and the Development section of the README | `dev/ty-precommit` (#5) |
@@ -38,8 +39,7 @@ This is `main` with `feat/fit`, `feat/library` and `feat/posterior` merged.
 ```text
 src/mda/
   bench.py, metrics.py, arrays.py, hypothesis.py, fit.py, library.py   done
-  pool.py, posterior.py                                                done
-  design.py     feat/design       V(a), CMA-ES and random design
+  pool.py, posterior.py, design.py                                     done
   config.py     feat/agent        MDAConfig: every hyperparameter, each citing the paper or a D-number
   agent.py      feat/agent        MDAAgent: init, design, update_state, get_model, get_predictor (Alg. 2)
   propose.py    feat/agent        Proposer protocol and NullProposer
@@ -74,7 +74,7 @@ flowchart TD
     main(["main"]) --> fit["feat/fit (done)"]
     fit --> library["feat/library (done)"]
     fit --> posterior["feat/posterior (done)"]
-    main --> design["feat/design"]
+    main --> design["feat/design (done)"]
     main --> llmc["feat/llm-client"]
     library --> agent["feat/agent"]
     posterior --> agent
@@ -95,7 +95,7 @@ flowchart TD
 
 There are three tracks, which can proceed in parallel:
 
-- **Numerics:** `feat/fit`, `feat/library` and `feat/posterior` (done), with `feat/design` alongside → `feat/agent` → `feat/runner`. `feat/design` can start now.
+- **Numerics:** `feat/fit`, `feat/library`, `feat/posterior` and `feat/design` (done) → `feat/agent` → `feat/runner`.
 - **LLM:** `feat/llm-client` can start now. `feat/proposer` waits for `feat/agent`.
 - **Evaluation:** `feat/analysis`, `feat/icl` and `feat/smc` start once the run-log schema from `feat/agent` is fixed.
 
@@ -104,7 +104,7 @@ There are three tracks, which can proceed in parallel:
 | 1 | `feat/fit` (done) | Bounded multistart least squares and residual diagnostics | main | M1 |
 | 2 | `feat/library` (done) | The 9 canonical seed laws | `feat/fit` | M1 |
 | 3 | `feat/posterior` (done) | Pool, BIC, weights, pruning, adaptive cap | `feat/fit` | M1 |
-| 4 | `feat/design` | $V(a)$, CMA-ES, random design | main | M1 |
+| 4 | `feat/design` (done) | $V(a)$, CMA-ES, random design | main | M1 |
 | 5 | `feat/agent` | MDA agent loop, predictive check, one-cell runner | 2, 3, 4 | M1 |
 | 6 | `feat/runner` | Grid runner, CLI, arm configs | 5 | M1 |
 | 7 | `feat/llm-client` | Claude wrapper, reply cache, cost accounting | main | M2 |
@@ -177,26 +177,32 @@ There are three tracks, which can proceed in parallel:
 - **Measured.** Refitting the 9 seeds on 25 points takes about half a second.
 - **Done when** `Pool.refit(D)` followed by `weights` reproduces Alg. 9 for both BIC variants.
 
-### 4. `feat/design`
+### 4. `feat/design` (done)
 
-- **Scope.** `mda/design.py`:
-  - `between_model_variance(U, weights, predictors)`, vectorised over a batch of unit-box designs (spec §6, D9). It depends only on weights and callables, not on `Pool`, so the branch can start from `main`.
-  - `cma_design(..., rng, n_evals=48)` (D10).
-  - `random_design(rng)`.
-- **Dependencies.** `uv add cma`.
-- **Tests.**
-  - $V = 0$ when all models agree or one model has weight 1, and $V \ge 0$ otherwise.
-  - Exactly 48 objective evaluations, with the result inside the bounds.
+- **Scope.** `mda/design.py`, as built:
+  - `between_model_variance(U, weights, predictors, *, space)`: $V(a)$ for a batch of unit-box designs (spec §6). It maps `U` to natural units with `from_unit` and compares the predictions on the raw rate by default, or on $\log(1 + y)$ (D9). It takes the weights and one predictor per model, a callable from conditions to rates, and does not import `Pool`, so the SMC control can pass predictors that average over particles. Models with weight 0 are skipped. $V$ is NaN where it is undefined: where a model with positive weight predicts a non-finite value, or where $V$ overflows. An unknown `space` raises `ValueError` before any model is evaluated.
+  - `cma_design(weights, predictors, *, rng, n_evals=48, sigma0=0.3, space)` returns the next condition in natural units (D10). pycma runs with its termination criteria ignored, so it always makes exactly `n_evals` evaluations; with the default population of 9, the sixth generation is cut to 3 points and not told to pycma. It returns the best point evaluated, ties going to the earliest, and never a NaN point. When $V$ is NaN at every point evaluated, it raises `DesignError`. pycma samples through `rng`, so it neither reads nor reseeds the global NumPy random state.
+  - `random_design(rng)`: uniform in the unit box, the distribution of `World.heldout`.
+  - Building the predictors from a pool is left to `feat/agent`: `lambda X, c=c: c.f(c.fit.theta, X)` for each candidate `c`.
+- **Constants.** `N_EVALS` and `SIGMA0` are module constants of `mda/design.py` until `feat/agent` adds `MDAConfig`. The functions already take them as arguments.
+- **Dependencies.** `cma`, added with `uv add`.
+- **Tests.** `tests/test_design.py` covers the four cases planned for this branch, then the edge cases:
+  - $V$ matches hand computation in both spaces. $V = 0$ when all models agree or one model has weight 1, and $V \ge 0$ otherwise.
+  - Exactly `n_evals` objective evaluations, also when that is not a multiple of the population size and when $V$ is flat, with every point inside the bounds.
   - On a toy two-model pool that disagrees only at high $C_A$, the design moves to high $C_A$.
-  - Deterministic for a given seed.
-- **Done when** a design takes less than a second for a 24-model pool.
+  - On two seeds that both explain $D_0$ of `c1_competitive_inhibition`, the design beats the best of 48 uniform points in all of 10 seeds, with a median $V$ ratio of 4.4. This is the test that tells a working search from a broken one: 48 uniform points would pass the toy test.
+  - pycma's own proposals stay inside the unit box, the best point evaluated is the one returned, and ties go to the earliest.
+  - Deterministic for a given seed, and independent of the global random state, which it leaves unchanged.
+  - Zero-weight models are never evaluated. Points where $V$ is undefined are never chosen, and the search retreats from them. When no point is defined, `DesignError` is raised after the full budget.
+  - Each of these was checked by breaking `cma_design` on purpose: minimising $V$, never updating pycma, dropping the bounds, returning the final mean, reversing the tie rule, ranking NaN points first, returning a point when none is defined, letting a later generation replace a better earlier point, keeping an overflowing $V$ as infinite, and not validating `space`. At least one test fails for each.
+- **Measured.** A design for a 24-model pool of seed laws takes about 10 ms.
 
 ### 5. `feat/agent`
 
 - **Scope.**
   - `mda/config.py`: `MDAConfig`, one dataclass with every value in spec §1–6 and D1–D15. Each field has a comment citing the paper or a D-number. It takes over `RHO`, `SIGMA_FLOOR`, `REL_FLOOR` and `LOG_SPAN` from `mda/fit.py`, `N_STARTS` from `mda/pool.py`, and `RSS_FLOOR`, `TAU_C`, `TAU_FIT`, `N_MIN` and `N_MAX` from `mda/posterior.py`. `fit` and `residuals` do not yet accept $\rho$, $\sigma_{\mathrm{floor}}$ or the threshold as arguments, so they change here too.
   - `mda/propose.py`: the `Proposer` protocol, `propose(kind, pool, D, budget_left) -> list[Hypothesis]`, plus `NullProposer`.
-  - `mda/agent.py`: `MDAAgent` implementing Alg. 2, with the predictive check (both variants, D5), $R_m$ and $N_e^{\max}$ gating (D4), adaptive cap and pruning, a current-data MAP `get_model`, and a plug-in `get_predictor`.
+  - `mda/agent.py`: `MDAAgent` implementing Alg. 2, with the predictive check (both variants, D5), $R_m$ and $N_e^{\max}$ gating (D4), adaptive cap and pruning, a current-data MAP `get_model`, and a plug-in `get_predictor`. Its design step catches `DesignError` from `cma_design` (spec §6), falls back to `random_design` and records the fallback in the run log.
   - `mda/run.py`: `run_cell(world, seed, config, proposer) -> RunLog` (Alg. 1). It evaluates RMSLE on the 1000-point grid, nMSLE on the 60-point query set (D11) and pass, at every $B$ from 3 to 25. The JSON run log records, per step: $x$, $y$, $e^*$, whether the pool expanded, the cap, and a pool snapshot (expression, $\hat\theta$, RSS, BIC, weight, origin, `added_at`), plus the LLM call IDs.
 - **Tests.**
   - With `NullProposer`, the pool never expands.
@@ -302,7 +308,7 @@ The paper's numbers come from GPT-5.6-Luna, and ours from Claude Haiku 5.5, so m
 - **Commits.** Messages start with `add:`, `update:`, `fix:` or `rm:`, as in the existing history.
 - **Hyperparameters.** Every hyperparameter lives in `MDAConfig`, never inline, with a comment citing the paper location or a D-number from the spec. When a default changes, update the spec in the same PR.
 - **Tests.** Tests never call the Claude API; use `FakeLLM` or a fake `Proposer`. Array-typed functions use the jaxtyping aliases in `mda.arrays`, so pytest checks shapes at run time.
-- **Dependencies.** Add them with `uv add`, in the branch that first needs them: `scipy` (`feat/fit`, added), `cma` (`feat/design`), `matplotlib` (`feat/analysis`).
+- **Dependencies.** Add them with `uv add`, in the branch that first needs them: `scipy` (`feat/fit`, added), `cma` (`feat/design`, added), `matplotlib` (`feat/analysis`).
 - **Vendored code.** `src/mda/_vendor` stays identical to upstream.
 
 ## Cost and compute
