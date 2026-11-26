@@ -13,9 +13,16 @@ Since it is important to get a grasp of the estimated API cost before running ex
 
 Note that while the original paper uses GPT5.6 Luna. In this work, we use Claude Haiku 5.5 as an alternative for some reasons, and Haiku's API cost is $0.10 (input) / $0.50 (output) per 1M tokens for prompts up to 100K tokens ([source](https://platform.claude.com/docs/en/models/haiku-5-5/overview)).
 
-The prompt provided to the LLM can be found in [./src/mda/prompts/chem_propose.txt](../src/mda/prompts/chem_propose.txt), and estimated its token count is approximately 400--1500 depending on the history lengths, according to [this unofficial token counter](https://wildandfreetools.com/ai-tools/token-counter/).
-There is also an official, free token count API endpoint provided by Anthropic, but it requires you to top-up your API credit first.
-(TODO: count API tokens using the official endpoint once I obtain API credits)
+The prompt provided to the LLM can be found in [./src/mda/prompts/chem_propose.txt](../src/mda/prompts/chem_propose.txt). Its size depends on the history length and the pool. Measured with Anthropic's official `count_tokens` endpoint for `claude-haiku-5-5` (`uv run python tools/llm_check.py count`), on stand-in prompts rendered from the template until `feat/proposer` adds the real renderer:
+
+| Prompt | Input tokens | With the structured-output schema (D15) |
+| --- | --- | --- |
+| Initialisation: 3 observations, no refining section | 504 | 929 |
+| Largest expansion: 25 observations, a full pool of 24 forms | 3,512 | 3,937 |
+
+So the 2,000 input tokens per prompt assumed below is a middle value, not an upper bound. Even if every call used the largest prompt, input would total $3{,}937 \times 23 \times 3 \times 57 \simeq 15.5$ M tokens, about \$1.55, so output still dominates the cost.
+
+A single real initialisation call (12 hypotheses requested, medium effort, structured output) used 929 input and 2,711 output tokens, thinking included, and cost \$0.0015. That is well under the 10,000 output tokens per prompt assumed below, but it is one sample; the M2 pilot will replace both assumptions with measured averages.
 
 For ChemBench, MDA is initialised with three scaler rate observations in $D_0$, which are created by varying $C_A \in \{0.03, 0.3, 3\}$ and holding the other terms constant. It then actively selects $K = 22$ additional experiments.
 The hypothesis space is initialised with 9 canonical mechanisms plus up to 12 valid, nonduplicate LLM proposals (= MDA starts with 21 hypothesis at maximum); later triggered calls request six candidates, with a live-pool cap of 24.
