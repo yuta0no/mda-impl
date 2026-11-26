@@ -6,7 +6,7 @@ from dataclasses import asdict
 import numpy as np
 import pytest
 
-from mda.bench import World, WorldSpec
+from mda.bench import N_TEST, TEST_SEED, World, WorldSpec
 from mda.hypothesis import (
     Hypothesis,
     HypothesisError,
@@ -33,7 +33,7 @@ def _X(n: int = 50) -> np.ndarray:
 def test_reproduces_world_truth():
     world = World(WorldSpec("c0_michaelis_menten"))
     p = world.oracle._law_params
-    X = world.heldout(seed=42, n=1000)
+    X = world.heldout(TEST_SEED, N_TEST)
     y = compile_hypothesis(MM)(np.array([p["kcat"], p["Km"]]), X)
     assert rmsle(y, world.truth(X)) < 1e-12
 

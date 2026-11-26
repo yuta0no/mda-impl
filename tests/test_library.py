@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from mda.bench import World, WorldSpec, canonical_worlds
+from mda.bench import N_TEST, TEST_SEED, World, WorldSpec, canonical_worlds
 from mda.fit import fit
 from mda.hypothesis import Hypothesis, compile_hypothesis
 from mda.library import SEED_BY_WORLD, SEED_LIBRARY
@@ -64,5 +64,5 @@ def test_seed_fits_its_world(world):
     X = w.heldout(0, 25)
     res = fit(h, X, w.truth(X), rng=np.random.default_rng(0), n_starts=8)
     assert res.ok
-    X_test = w.heldout(42, 1000)
+    X_test = w.heldout(TEST_SEED, N_TEST)
     assert rmsle(compile_hypothesis(h)(res.theta, X_test), w.truth(X_test)) < 0.05
