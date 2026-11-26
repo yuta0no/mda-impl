@@ -20,7 +20,8 @@ import threading
 import time
 import warnings
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Generator, Iterable, Iterator
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -233,9 +234,11 @@ class LLMClient(ABC):
     Subclasses set `provider`, implement `model` and `_send`, and add their own generation settings
     to `settings()`. They can also implement `count_tokens`.
 
-    A client can be shared between threads. It cannot be pickled, so with multiprocessing each
-    worker builds its own: workers can share a `cache_dir`, and each should write its own
-    transcript.
+    A client can be shared between threads: the totals and the transcript stay consistent, and
+    concurrent calls for the same cache entry send only once, the others waiting for that reply.
+    A client cannot be pickled, so with multiprocessing each worker builds its own: workers can
+    share a `cache_dir`, and each should write its own transcript. Nothing stops two processes
+    from sending the same call at the same time, so each `call_id` must belong to one worker.
     """
 
     provider: ClassVar[str]
@@ -259,7 +262,9 @@ class LLMClient(ABC):
         self.cost = 0.0  # USD, likewise
         self.n_sent = 0  # calls the provider answered; a request that fails is not counted
         self.n_cached = 0  # calls answered from the cache
-        self._lock = threading.Lock()
+        self._lock = threading.Lock()  # guards the totals, the transcript and `_entry_locks`
+        # One lock per cache entry in use, with the number of calls holding or waiting for it
+        self._entry_locks: dict[Path, tuple[threading.Lock, int]] = {}
 
     @property
     @abstractmethod
@@ -298,12 +303,17 @@ class LLMClient(ABC):
         `ValueError` for an invalid `call_id`.
         """
         request = Request(system, user, schema)
-        if call_id is not None:
-            # Checked even without a cache, so that a test rejects the IDs a cached run would
-            _check_call_id(call_id)
-        key = None
-        if call_id is not None and self.cache is not None:
-            key = _hash({"settings": self.settings(), "request": asdict(request)})
+        if call_id is None:
+            return self._send_and_record(None, request, None)
+        # Checked even without a cache, so that a test rejects the IDs a cached run would
+        _check_call_id(call_id)
+        if self.cache is None:
+            return self._send_and_record(call_id, request, None)
+
+        key = _hash({"settings": self.settings(), "request": asdict(request)})
+        # One call at a time per cache entry. Otherwise two threads making the same call would
+        # both miss the cache and both send, paying twice and getting two different replies
+        with self._exclusive(self.cache.path(call_id, key)):
             cached = self.cache.get(call_id, key)
             if cached is not None:
                 reply = replace(cached, cached=True)
@@ -311,7 +321,29 @@ class LLMClient(ABC):
                     self.n_cached += 1
                     self._log(call_id, request, reply, latency=0.0)
                 return reply
+            return self._send_and_record(call_id, request, key)
 
+    @contextmanager
+    def _exclusive(self, entry: Path) -> Generator[None, None, None]:
+        """Hold the lock of one cache entry. Calls for other entries are not held up, and a lock
+        is dropped once no call holds or waits for it."""
+        with self._lock:
+            lock, users = self._entry_locks.get(entry, (threading.Lock(), 0))
+            self._entry_locks[entry] = (lock, users + 1)
+        try:
+            with lock:
+                yield
+        finally:
+            with self._lock:
+                lock, users = self._entry_locks[entry]
+                if users > 1:
+                    self._entry_locks[entry] = (lock, users - 1)
+                else:
+                    del self._entry_locks[entry]
+
+    def _send_and_record(self, call_id: str | None, request: Request, key: str | None) -> Reply:
+        """Send the request, add it to the totals and the transcript, and cache the reply under
+        `key` when there is one."""
         start = time.perf_counter()
         reply = self._send(request)
         latency = time.perf_counter() - start

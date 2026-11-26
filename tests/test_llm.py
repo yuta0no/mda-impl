@@ -1,6 +1,7 @@
 import json
 import re
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
@@ -750,6 +751,62 @@ def test_client_can_be_shared_between_threads(tmp_path: Path):
     assert llm.usage == Usage(total, 2 * total)
     assert llm.cost == pytest.approx(total * (0.10 + 2 * 0.50) / 1e6)
     assert len(read_jsonl(transcript)) == total  # every line is whole
+
+
+def test_identical_concurrent_calls_send_once(tmp_path: Path):
+    def slow(request: Request) -> str:
+        time.sleep(0.05)  # long enough for the other threads to arrive while this one is sending
+        return f"reply {len(llm.requests)}"
+
+    llm = FakeLLM(slow, pricing=HAIKU, cache_dir=tmp_path)
+    with ThreadPoolExecutor(8) as pool:
+        replies = list(pool.map(lambda _: llm.complete("s", "u", call_id="c"), range(8)))
+
+    # One thread sent; the others waited for it and took its reply from the cache
+    assert len(llm.requests) == 1
+    assert {r.text for r in replies} == {"reply 1"}
+    assert sorted(r.cached for r in replies) == [False] + [True] * 7
+    assert (llm.n_sent, llm.n_cached) == (1, 7)
+    assert not llm._entry_locks  # no lock is kept once the calls are over
+
+
+def test_different_calls_are_sent_in_parallel(tmp_path: Path):
+    # Each send waits until all four are in flight, so this passes only if calls for different
+    # cache entries do not wait for one another. Otherwise the barrier times out and raises
+    barrier = threading.Barrier(4, timeout=5)
+
+    def together(request: Request) -> str:
+        barrier.wait()
+        return "r"
+
+    llm = FakeLLM(together, cache_dir=tmp_path)
+    with ThreadPoolExecutor(4) as pool:
+        replies = list(pool.map(lambda k: llm.complete("s", "u", call_id=f"c/{k}"), range(4)))
+    assert [r.cached for r in replies] == [False] * 4
+    assert not llm._entry_locks
+
+
+def test_waiting_call_sends_itself_when_the_first_one_fails(tmp_path: Path):
+    started = threading.Event()
+
+    def flaky(request: Request) -> str:
+        if len(llm.requests) == 1:
+            started.set()
+            time.sleep(0.05)  # the second call arrives and waits meanwhile
+            raise LLMError("down")
+        return "ok"
+
+    llm = FakeLLM(flaky, cache_dir=tmp_path)
+    with ThreadPoolExecutor(2) as pool:
+        first = pool.submit(llm.complete, "s", "u", call_id="c")
+        assert started.wait(timeout=5)
+        second = pool.submit(llm.complete, "s", "u", call_id="c")
+        with pytest.raises(LLMError, match="down"):
+            first.result(timeout=5)
+        # The error was not cached and released the entry, so the waiting call sent its own
+        assert second.result(timeout=5).text == "ok"
+    assert (len(llm.requests), llm.n_sent, llm.n_cached) == (2, 1, 0)
+    assert not llm._entry_locks
 
 
 # --- Hypotheses schema (D15) ----------------------------------------------------------------------
