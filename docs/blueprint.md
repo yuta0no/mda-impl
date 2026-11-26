@@ -1,6 +1,6 @@
 # Implementation blueprint
 
-This blueprint lists what remains to reproduce the Model Discovery Agent (MDA) experiment on ChemBench ([arXiv:2608.09696v5](https://arxiv.org/abs/2608.09696), §4.1 and App. B), and which branch implements each part. [chembench-spec.md](./chembench-spec.md) gives the paper's settings and our defaults where the paper is silent (D1–D19); this file refers to it as "spec §n".
+This blueprint lists what remains to reproduce the Model Discovery Agent (MDA) experiment on ChemBench ([arXiv:2608.09696v5](https://arxiv.org/abs/2608.09696), §4.1 and App. B), and which branch implements each part. [chembench-spec.md](./chembench-spec.md) gives the paper's settings and our defaults where the paper is silent (D1–D20); this file refers to it as "spec §n".
 
 **In scope:**
 
@@ -17,16 +17,18 @@ This blueprint lists what remains to reproduce the Model Discovery Agent (MDA) e
 
 ## Current state
 
-This is `main` with `feat/fit` and `feat/library` merged.
+This is `main` with `feat/fit`, `feat/library` and `feat/posterior` merged.
 
 | Module | Contents | Merged in |
 | --- | --- | --- |
 | `mda.bench` | `World` (`observe`, `truth`, `heldout`), `to_unit` and `from_unit`, benchmark constants | `feat/chembench` (#1) |
 | `mda.metrics` | `rmsle`, `nmsle`, `passed` | `feat/chembench` (#1) |
-| `mda.arrays` | jaxtyping aliases | `feat/chembench` (#1) |
-| `mda.hypothesis` | `Hypothesis`, `Param`, `Model`, `compile_hypothesis`, `parse_hypotheses` | `feat/hypothesis` (#4), `feat/fit` (#8) |
+| `mda.arrays` | jaxtyping aliases | `feat/chembench` (#1), `feat/posterior` |
+| `mda.hypothesis` | `Hypothesis`, `Param`, `Model`, `compile_hypothesis`, `normalise_expr`, `parse_hypotheses` | `feat/hypothesis` (#4), `feat/fit` (#8), `feat/posterior` |
 | `mda.fit` | `fit` and `FitResult`, `sigma`, `residuals`, `relative_residuals`, `residual_input_spearman` | `feat/fit` (#8) |
 | `mda.library` | `SEED_LIBRARY`, the 9 seed laws with the D7 bounds, and `SEED_BY_WORLD`, mapping each canonical world to its seed | `feat/library` (#9) |
+| `mda.pool` | `Candidate`, `Origin` and `Pool`: `add` with exact-expression dedupe, `refit`, `keep`, and the per-model arrays `rss`, `n_free` and `fit_err` | `feat/posterior` |
+| `mda.posterior` | `bic_profiled`, `bic_fixed`, `log_prior`, `log_weights`, `weights`, `prune_top`, `adaptive_cap` | `feat/posterior` |
 | `prompts/chem_propose.txt` | The proposer prompt, verbatim from App. G.1 | — |
 | CI | pre-commit, ty, and pytest on Python 3.12 and 3.13 | `dev/ci` (#2), `dev/ty` (#3) |
 | Tooling | ty as a pre-commit hook, and the Development section of the README | `dev/ty-precommit` (#5) |
@@ -36,8 +38,7 @@ This is `main` with `feat/fit` and `feat/library` merged.
 ```text
 src/mda/
   bench.py, metrics.py, arrays.py, hypothesis.py, fit.py, library.py   done
-  pool.py       feat/posterior    Candidate and Pool: fitted hypotheses, dedupe, refit, diagnostics
-  posterior.py  feat/posterior    BIC (profiled and fixed scale), weights, top-N pruning, adaptive cap
+  pool.py, posterior.py                                                done
   design.py     feat/design       V(a), CMA-ES and random design
   config.py     feat/agent        MDAConfig: every hyperparameter, each citing the paper or a D-number
   agent.py      feat/agent        MDAAgent: init, design, update_state, get_model, get_predictor (Alg. 2)
@@ -72,7 +73,7 @@ flowchart LR
 flowchart TD
     main(["main"]) --> fit["feat/fit (done)"]
     fit --> library["feat/library (done)"]
-    fit --> posterior["feat/posterior"]
+    fit --> posterior["feat/posterior (done)"]
     main --> design["feat/design"]
     main --> llmc["feat/llm-client"]
     library --> agent["feat/agent"]
@@ -94,7 +95,7 @@ flowchart TD
 
 There are three tracks, which can proceed in parallel:
 
-- **Numerics:** `feat/fit` and `feat/library` (done) → `feat/posterior`, with `feat/design` alongside → `feat/agent` → `feat/runner`. `feat/posterior` can start now.
+- **Numerics:** `feat/fit`, `feat/library` and `feat/posterior` (done), with `feat/design` alongside → `feat/agent` → `feat/runner`. `feat/design` can start now.
 - **LLM:** `feat/llm-client` can start now. `feat/proposer` waits for `feat/agent`.
 - **Evaluation:** `feat/analysis`, `feat/icl` and `feat/smc` start once the run-log schema from `feat/agent` is fixed.
 
@@ -102,7 +103,7 @@ There are three tracks, which can proceed in parallel:
 | --- | --- | --- | --- | --- |
 | 1 | `feat/fit` (done) | Bounded multistart least squares and residual diagnostics | main | M1 |
 | 2 | `feat/library` (done) | The 9 canonical seed laws | `feat/fit` | M1 |
-| 3 | `feat/posterior` | Pool, BIC, weights, pruning, adaptive cap | `feat/fit` | M1 |
+| 3 | `feat/posterior` (done) | Pool, BIC, weights, pruning, adaptive cap | `feat/fit` | M1 |
 | 4 | `feat/design` | $V(a)$, CMA-ES, random design | main | M1 |
 | 5 | `feat/agent` | MDA agent loop, predictive check, one-cell runner | 2, 3, 4 | M1 |
 | 6 | `feat/runner` | Grid runner, CLI, arm configs | 5 | M1 |
@@ -147,19 +148,33 @@ There are three tracks, which can proceed in parallel:
   - Fitting each seed to 25 noiseless `World.truth` points (8 random starts) gives RMSLE < 0.05 on `heldout(42, 1000)`.
 - **Done when** the fixed-library arm can represent all 9 canonical worlds.
 
-### 3. `feat/posterior`
+### 3. `feat/posterior` (done)
 
-- **Scope.**
-  - `mda/pool.py`: `Candidate` (hypothesis, compiled function, fit, origin: `seed`, `init` or `expand@B`) and `Pool`, with exact-expression dedupe (D13), refit of everything on $D$, and the per-candidate median relative residual.
-  - `mda/posterior.py`: `bic_profiled` with the RSS floor (D2), `bic_fixed`, `log_prior(lam)`, `weights`, `prune_top(n)`, and `adaptive_cap(weights, fit_err)` returning 6 or 24 (spec §3–4).
-  - Models with non-finite RSS get weight 0 and are pruned first.
-- **Tests.**
+- **Scope.** As built:
+  - `mda/pool.py`:
+    - `Candidate`: a hypothesis, its compiled function, its dedupe key, its `origin` (the enum `Origin`: `SEED`, `INIT` or `EXPAND`), `added_at` (the number of observations $B$ when it was added), its fit, and `fit_err`, the in-sample median relative residual of that fit. `n_free` is $C_m$: the parameters with `low < high` (D20).
+    - `Pool.add(hypotheses, origin, added_at=B)`: drops exact-expression duplicates (D13), both of the pool and within the batch, and returns the candidates it added. They have no fit until the next `refit`.
+    - `Pool.refit(X, y, rng=...)`: fits every candidate to all the data, with 8 random starts and a warm start from the candidate's previous estimate (D8).
+    - `Pool.keep(indices)` removes the other candidates. The per-model arrays `rss`, `n_free` and `fit_err` follow the pool order; `rss` and `fit_err` raise while a candidate has no fit.
+  - `mda/posterior.py`, which works on per-model arrays and does not import `Pool`:
+    - `bic_profiled` with the RSS floor (D2), `bic_fixed`, and `log_prior(n_params, lam)`.
+    - `log_weights` and `weights`: the softmax of $-\mathrm{BIC}_m / 2 + \log p(m)$ and its logarithm (spec §3).
+    - `prune_top(log_w, n)` returns the indices of the kept models, in pool order, and their renormalised log weights. It ranks log weights because a weight far behind the best underflows to exactly 0, which is routine under the fixed-scale BIC. Ranking the weights would then drop models by pool position, the newest proposals first, instead of by fit.
+    - `adaptive_cap(w, fit_err)` returns 6 or 24 (spec §4).
+  - `normalise_expr` in `mda/hypothesis.py`: the dedupe key. It shares the comment and whitespace handling of `compile_hypothesis`.
+  - Models with non-finite RSS get BIC = inf and weight 0, and are pruned first. When no model has a finite RSS, every weight is 0.
+- **Constants.** `N_STARTS` in `mda/pool.py`, and `RSS_FLOOR`, `TAU_C`, `TAU_FIT`, `N_MIN` and `N_MAX` in `mda/posterior.py`, are module constants until `feat/agent` adds `MDAConfig`. The functions already take them as arguments.
+- **Tests.** `tests/test_posterior.py`, `tests/test_pool.py` and the `normalise_expr` cases in `tests/test_hypothesis.py` cover the six cases planned for this branch, then the pool's bookkeeping:
   - BIC values against hand computation.
   - Weights sum to 1, and their order is consistent with BIC.
-  - $\mathrm{RSS} = 0$ does not produce NaN.
-  - Pruning keeps the largest weights.
+  - $\mathrm{RSS} = 0$ does not produce NaN: exact fits tie, and the parameter count decides between them.
+  - Pruning keeps the largest weights. Non-finite models go first, even among weights that underflow to 0.
   - The cap thresholds behave correctly just above and below 0.9 and 0.05.
   - Dedupe ignores formatting but treats a renamed parameter as a new expression.
+  - `n_free` leaves out fixed parameters, and a law with one held fixed is ahead of the same law with it free by $\sqrt{N}$.
+  - `refit` is deterministic for a given RNG, warm-starts from the previous estimate, and leaves the pool unchanged when a fit raises.
+  - On 25 observations of `c1_competitive_inhibition`, the seed pool's weights match Alg. 9 written out per model for both BIC variants, the true seed has weight above 0.99, and the cap drops to 6.
+- **Measured.** Refitting the 9 seeds on 25 points takes about half a second.
 - **Done when** `Pool.refit(D)` followed by `weights` reproduces Alg. 9 for both BIC variants.
 
 ### 4. `feat/design`
@@ -179,10 +194,10 @@ There are three tracks, which can proceed in parallel:
 ### 5. `feat/agent`
 
 - **Scope.**
-  - `mda/config.py`: `MDAConfig`, one dataclass with every value in spec §1–6 and D1–D15. Each field has a comment citing the paper or a D-number. It takes over `RHO`, `SIGMA_FLOOR`, `REL_FLOOR` and `LOG_SPAN` from `mda/fit.py`. `fit` and `residuals` do not yet accept $\rho$, $\sigma_{\mathrm{floor}}$ or the threshold as arguments, so they change here too.
+  - `mda/config.py`: `MDAConfig`, one dataclass with every value in spec §1–6 and D1–D15. Each field has a comment citing the paper or a D-number. It takes over `RHO`, `SIGMA_FLOOR`, `REL_FLOOR` and `LOG_SPAN` from `mda/fit.py`, `N_STARTS` from `mda/pool.py`, and `RSS_FLOOR`, `TAU_C`, `TAU_FIT`, `N_MIN` and `N_MAX` from `mda/posterior.py`. `fit` and `residuals` do not yet accept $\rho$, $\sigma_{\mathrm{floor}}$ or the threshold as arguments, so they change here too.
   - `mda/propose.py`: the `Proposer` protocol, `propose(kind, pool, D, budget_left) -> list[Hypothesis]`, plus `NullProposer`.
   - `mda/agent.py`: `MDAAgent` implementing Alg. 2, with the predictive check (both variants, D5), $R_m$ and $N_e^{\max}$ gating (D4), adaptive cap and pruning, a current-data MAP `get_model`, and a plug-in `get_predictor`.
-  - `mda/run.py`: `run_cell(world, seed, config, proposer) -> RunLog` (Alg. 1). It evaluates RMSLE on the 1000-point grid, nMSLE on the 60-point query set (D11) and pass, at every $B$ from 3 to 25. The JSON run log records, per step: $x$, $y$, $e^*$, whether the pool expanded, the cap, and a pool snapshot (expression, $\hat\theta$, RSS, BIC, weight, origin), plus the LLM call IDs.
+  - `mda/run.py`: `run_cell(world, seed, config, proposer) -> RunLog` (Alg. 1). It evaluates RMSLE on the 1000-point grid, nMSLE on the 60-point query set (D11) and pass, at every $B$ from 3 to 25. The JSON run log records, per step: $x$, $y$, $e^*$, whether the pool expanded, the cap, and a pool snapshot (expression, $\hat\theta$, RSS, BIC, weight, origin, `added_at`), plus the LLM call IDs.
 - **Tests.**
   - With `NullProposer`, the pool never expands.
   - With a fake proposer, the pool expands exactly when $e^* > \tau_e$, respecting $R_m$, $N_e^{\max}$ and the cap.
@@ -294,3 +309,24 @@ The paper's numbers come from GPT-5.6-Luna, and ours from Claude Haiku 5.5, so m
 
 - **API.** The hybrid arm makes at most 23 proposer calls per cell (1 at initialisation and up to 22 expansions, D4), over 171 cells. The estimate in [api-cost-estimation.md](./api-cost-estimation.md) stands until the M2 pilot replaces it with measured usage. Only the fixed-library arm makes no calls. The random-design, fixed-scale-BIC and SMC controls make their own expansion calls; the paper's fixed-scale arms reuse the paired arm's initialisation reply (Fig. 7 caption) instead of making a new call.
 - **CPU.** Each update refits at most 24 models with 9 starts each (8 random starts and a warm start) on at most 25 points, and runs 48 CMA-ES evaluations of $V(a)$. A seed law fits in about 40 ms, so refitting a full pool takes about a second, and longer when the laws have more parameters. This is cheap, so parallelise across cells, not within them. SMC costs about 100 particles × rungs × moves per model per update, which is why the paper limits it to a 12-world cohort (D12).
+
+## Future to-dos
+
+These are not scheduled in the branch plan, and no milestone needs them.
+
+### Looser duplicate matching
+
+- **Now.** `normalise_expr` gives two expressions the same dedupe key when they differ only in whitespace, comments, redundant parentheses or the spelling of a number (D13). Parentheses that change the grouping (`a*(b*c)` against `a*b*c`) and a different operand order (`Km + C_A` against `C_A + Km`) make a new expression, so the weight of one law can split between such copies (spec §11, "Near-duplicates").
+- **Change.** Build the key with a recursive pass over the AST, in place of `ast.unparse`:
+  - Flatten nested `+` chains into one sum and nested `*` chains into one product. This removes the grouping differences.
+  - Sort the operands of each sum and product by their own keys. This removes the ordering differences.
+  - Leave `**` and function calls as they are, and canonicalise only their arguments.
+- **Options.** How far to take `-` and `/` decides the size of the change:
+  - Without them, `a - b + c` and `c + a - b` stay distinct, as do `a*b/c` and `a/c*b`.
+  - With them, a subtraction becomes a sum of signed terms, and a division a product of numerator and denominator factors.
+  - Pulling the sign out of products also merges `-a*b`, `-(a*b)` and `a*(-b)`.
+- **Cost.** An estimate, not prototyped: about 30 lines without `-` and `/`, and 40 to 60 with them, plus tests. Only `normalise_expr` changes. `Pool` treats the key as an opaque string, and each candidate still evaluates its own expression, so floating-point differences between the merged forms do not matter.
+- **Not covered.** Both of these cost considerably more:
+  - Algebraic rewrites, such as `Km*(1 + C_I/Ki)` against `Km + Km*C_I/Ki`, or `C_A*C_A` against `C_A**2`. They need sympy, or a numerical comparison of the two functions at random points.
+  - Renamed parameters. Once operands are sorted, the canonical order depends on the names, so renaming needs its own handling.
+- **Spec.** The paper matches exact expressions (D13), so adopting this is a deviation from it. Update D13 in the same PR.

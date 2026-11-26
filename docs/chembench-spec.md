@@ -57,10 +57,10 @@ The primary arm uses point estimates and BIC weights. Sources: App. A.6.3 (BIC a
 
 - **Point estimate.** $\hat\theta_m = \arg\min_\theta \mathrm{RSS}_m(\theta)$ over the declared bounds, by bounded multistart nonlinear least squares. Every model is refitted on all data at every update.
 - **Whitened residuals.** $\mathrm{RSS}_m(\theta) = \sum_n \big((y_n - \hat y_n(\theta)) / \sigma_n\big)^2$ with $\sigma_n = \max(\rho |y_n|, \sigma_{\mathrm{floor}})$, $\rho = 0.03$, $\sigma_{\mathrm{floor}} = 0.01$.
-- **Profiled-scale BIC** (the headline configuration): $\mathrm{BIC}_m = N \log(\mathrm{RSS}_m / N) + C_m \log N$, where $C_m$ is the number of parameters.
+- **Profiled-scale BIC** (the headline configuration): $\mathrm{BIC}_m = N \log(\mathrm{RSS}_m / N) + C_m \log N$, where $C_m$ is the number of free parameters ([D20](#10-where-the-paper-is-silent)).
 - **Fixed-scale BIC** ($\tau = 1$, a control): $\mathrm{BIC}_m = \mathrm{RSS}_m + C_m \log N$.
 - **Weights.** $p(m \mid D) = \mathrm{softmax}_m(-\mathrm{BIC}_m / 2 + \log p(m))$ with $p(m) \propto e^{-\lambda C_m}$ and $\lambda = 0$ for the BIC arm (Table 2).
-- **Pruning.** Keep the $N_m$ models with the largest weights and renormalise.
+- **Pruning.** Keep the $N_m$ models with the largest weights and renormalise. A model whose RSS is not finite has weight 0 and is pruned first.
 - **Prediction.** Take the current-data MAP structure $\hat m = \arg\max_m p(m \mid D)$ and predict $f_{\hat m}(x; \hat\theta_{\hat m})$ (§4.1; `get-model` and `get-predictor` in Alg. 2). There is no model averaging.
 
 ## 4. Pool management
@@ -159,6 +159,7 @@ Each default below is ours. In code, put it in `MDAConfig` with a comment naming
 | D17 | Reproducibility of LLM calls | Cache each reply keyed by (arm, world, seed, call index, prompt hash), so a rerun replays the reply instead of querying again | — |
 | D18 | SMC settings not given: target ESS fraction $\eta$, moves per rung $R_p$, rung cap $J_p$ | $\eta = 0.5$, $R_p = 5$, $J_p = 100$. Proposals outside the bounds are rejected. The proposal scale is half the per-coordinate particle standard deviation, floored at $10^{-3}$ before scaling (Alg. 6 caption) | — |
 | D19 | Estimator for paired ratios between two methods | Average the paired log-ratios of the seeds within each world, take the mean over worlds, exponentiate, and bootstrap worlds | Ratio of the two methods' aggregated curves |
+| D20 | Does a parameter whose bounds coincide count towards $C_m$? | No. $C_m$ counts the free parameters, those with `low < high`. The fit holds a parameter with `low == high` fixed, so it adds no flexibility to penalise | — |
 
 ## 11. Inconsistencies and pitfalls in the paper
 
