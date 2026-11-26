@@ -72,6 +72,8 @@ def between_model_variance(
         mu = np.stack([predictors[m](X) for m in active.tolist()])
         if space == "log1p":
             mu = np.log1p(mu)
+        elif space != "raw":
+            raise ValueError(f"unknown space {space!r}")
         w = w[active]
         mean = w @ mu
         v = w @ (mu - mean) ** 2
