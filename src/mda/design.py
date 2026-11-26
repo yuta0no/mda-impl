@@ -41,6 +41,10 @@ Values = Float[np.ndarray, " n"]  # one objective value per design
 _DIM = len(INPUT_NAMES)
 
 
+class DesignError(RuntimeError):
+    """`cma_design` found no condition at which V(a) is defined."""
+
+
 def between_model_variance(
     U: UnitDesigns,
     weights: PerModel,
@@ -55,10 +59,13 @@ def between_model_variance(
     returns them, and `predictors[m]` gives mu_m in natural units. `space` is the space in which
     the predictions are compared: the raw rate (D9) or log(1 + rate).
 
-    Models with weight 0 are skipped, so a pruned or unfittable model cannot affect V. Where a
-    model with positive weight predicts a non-finite value (or one at or below -1 in log1p
-    space), V is NaN, and `cma_design` never chooses that point.
+    Models with weight 0 are skipped, so a pruned or unfittable model cannot affect V. V is NaN
+    where it is undefined: where a model with positive weight predicts a non-finite value (or
+    one at or below -1 in log1p space), or where predictions are so large that V overflows.
+    `cma_design` never chooses such a point.
     """
+    if space not in ("raw", "log1p"):
+        raise ValueError(f"unknown space {space!r}")
     w = np.asarray(weights, dtype=float)
     if len(predictors) != w.shape[0]:
         raise ValueError(f"{w.shape[0]} weights for {len(predictors)} predictors")
@@ -72,12 +79,11 @@ def between_model_variance(
         mu = np.stack([predictors[m](X) for m in active.tolist()])
         if space == "log1p":
             mu = np.log1p(mu)
-        elif space != "raw":
-            raise ValueError(f"unknown space {space!r}")
         w = w[active]
         mean = w @ mu
         v = w @ (mu - mean) ** 2
-    return np.where(np.all(np.isfinite(mu), axis=0), v, np.nan)
+    # A non-finite prediction makes v NaN or inf, and so does an overflow of finite ones
+    return np.where(np.isfinite(v), v, np.nan)
 
 
 def cma_design(
@@ -95,6 +101,10 @@ def cma_design(
     population size (9 in 7-d) and keeps every candidate in [0, 1]^7. It stops after exactly
     `n_evals` evaluations of V, cutting the last generation short if needed, and returns the
     best point evaluated, not the final mean. Ties go to the earliest point evaluated.
+
+    A point where V is NaN is never returned, and pycma is told it is the worst of its
+    generation. Raises `DesignError` when V is NaN at every point evaluated, which leaves no
+    valid design to return; the caller decides what to do instead, such as `random_design`.
 
     pycma ignores its termination criteria here: a flat V (one model with weight 1, or models
     that agree everywhere) still takes `n_evals` evaluations. All randomness comes from `rng`;
@@ -122,15 +132,19 @@ def cma_design(
         U = U[:n_left]
         v = between_model_variance(U, weights, predictors, space=space)
         n_left -= U.shape[0]
-        finite = np.isfinite(score)
-        if finite.any():
-            i = int(np.argmax(score))
-            if best_u is None or score[i] > best_v:
-                best_u, best_v = U[i], score[i]
+        defined = ~np.isnan(v)
+        if defined.any():
+            i = int(np.nanargmax(v))  # the earliest of the largest defined values
+            if v[i] > best_v:
+                best_u, best_v = U[i], v[i]
         if full:
-            # pycma minimises; a NaN V ranks below every finite value
-            es.tell(list(U), list(np.where(np.isnan(v), np.inf, -v)))
-    assert best_u is not None
+            # pycma minimises; a NaN V ranks below every defined value
+            es.tell(list(U), list(np.where(defined, -v, np.inf)))
+    if best_u is None:
+        raise DesignError(
+            f"V(a) is undefined at all {n_evals} points evaluated: "
+            "a model with positive weight predicts no finite rate at any of them"
+        )
     return from_unit(best_u)
 
 

@@ -101,7 +101,7 @@ In the BIC arm, $\bar\mu_m(a) = f_m(a; \hat\theta_m)$. $V(a)$ is the model-disag
 
 - **Optimiser.** CMA-ES with 48 objective evaluations per round on the normalised 7-d box. The paper says the "concentration and enzyme axes are mapped logarithmically and temperature and pH linearly". `mda.bench.to_unit` and `from_unit` follow the benchmark instead: $C_A$, $C_B$ and $\mathrm{Enz}$ are logarithmic, and $C_I$ and $C_P$ are linear because their lower bound is 0. Batch size is 1, and the pool is refitted before the next design.
 - **Random-design control.** Draw uniformly in the unit box, the same distribution as `World.heldout`.
-- **Non-finite predictions.** The paper does not say how $V(a)$ treats them. Models with weight 0 are left out of $V(a)$, so a pruned or unfittable model cannot affect it. Where a model with positive weight predicts a non-finite value, $V(a)$ is undefined, and CMA-ES ranks the point below every other.
+- **Non-finite predictions.** The paper does not say how $V(a)$ treats them. Models with weight 0 are left out of $V(a)$, so a pruned or unfittable model cannot affect it. $V(a)$ is undefined where a model with positive weight predicts a non-finite value, or where the predictions are so large that $V(a)$ overflows. CMA-ES ranks such a point below every other and never returns it. If $V(a)$ is undefined at all 48 points, the design step raises `DesignError`, and the agent falls back to a random design and records it in the run log.
 
 ## 7. Evaluation and reporting
 

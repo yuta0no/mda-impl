@@ -1,3 +1,4 @@
+import inspect
 import time
 
 import numpy as np
@@ -8,6 +9,7 @@ from mda.bench import INPUT_NAMES, World, WorldSpec, from_unit, to_unit
 from mda.design import (
     N_EVALS,
     SIGMA0,
+    DesignError,
     between_model_variance,
     cma_design,
     random_design,
@@ -163,6 +165,23 @@ def test_log1p_of_rates_at_or_below_minus_one_gives_nan():
     assert np.isnan(v[0])
 
 
+@pytest.mark.filterwarnings("error")
+def test_overflowing_variance_is_nan():
+    # Both predictions are finite, but their squared gap is not: V is undefined, not infinite
+    v = between_model_variance(CENTRE, np.array([0.5, 0.5]), [const(0.0), const(1e200)])
+    assert np.isnan(v[0])
+
+
+def test_variance_rejects_unknown_space():
+    # Under pytest the runtime type check rejects the argument first. A real run has no such
+    # check, so call the undecorated function.
+    f = inspect.unwrap(between_model_variance)
+    rec = Recorder(c_a)
+    with pytest.raises(ValueError, match="unknown space 'log'"):
+        f(CENTRE, np.array([0.5, 0.5]), [rec, c_a], space="log")
+    assert rec.seen == []  # rejected before any model is evaluated
+
+
 def test_variance_rejects_bad_weights():
     with pytest.raises(ValueError, match="2 weights for 3 predictors"):
         between_model_variance(CENTRE, np.array([0.5, 0.5]), [c_a, c_a, c_a])
@@ -280,6 +299,45 @@ def test_cma_search_retreats_from_nan_points():
         rec = Recorder(half_broken)
         cma_design(np.array([0.5, 0.5]), [c_a, rec], rng=np.random.default_rng(seed))
         assert np.mean(rec.X[18:, CA] > 1.0) < 0.6
+
+
+@pytest.mark.filterwarnings("error")
+def test_cma_design_raises_when_no_point_is_defined():
+    # Returning the first point evaluated would break "never chooses a NaN point"
+    rec = Recorder(const(np.nan))
+    with pytest.raises(DesignError, match="undefined at all 48 points"):
+        cma_design(np.array([0.5, 0.5]), [c_a, rec], rng=np.random.default_rng(0))
+    assert rec.X.shape[0] == N_EVALS  # it used the whole budget before giving up
+
+
+@pytest.mark.filterwarnings("error")
+def test_cma_design_uses_a_single_defined_point():
+    # V is defined only in the first generation: later, all-NaN generations must not replace it
+    calls = 0
+
+    def first_call_only(X):
+        nonlocal calls
+        calls += 1
+        return c_a_curved(X) if calls == 1 else np.full(X.shape[0], np.nan)
+
+    rec = Recorder(c_a)
+    w = np.array([0.5, 0.5])
+    x = cma_design(w, [rec, first_call_only], rng=np.random.default_rng(0))
+    first = rec.seen[0]
+    v = between_model_variance(to_unit(first), w, [c_a, c_a_curved])
+    np.testing.assert_array_equal(x, first[np.argmax(v)])
+
+
+@pytest.mark.filterwarnings("error")
+def test_cma_design_never_chooses_an_overflowing_point():
+    # Above C_A = 1 the gap between the models is finite but its square overflows
+    def huge_above_one(X):
+        return np.where(X[:, CA] > 1.0, 1e200, c_a_curved(X))
+
+    rec = Recorder(huge_above_one)
+    x = cma_design(np.array([0.5, 0.5]), [c_a, rec], rng=np.random.default_rng(0))
+    assert (rec.X[:, CA] > 1.0).any()
+    assert x[CA] <= 1.0
 
 
 def test_cma_design_is_deterministic_for_a_seed():
