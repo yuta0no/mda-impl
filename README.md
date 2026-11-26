@@ -13,7 +13,7 @@ pre-commit install           # once per clone: run the hooks on every commit
 cp .env.sample .env          # then set ANTHROPIC_API_KEY in .env
 ```
 
-`.env` is ignored by git. The API key is only needed by code that calls the Claude API, such as `tools/token_count.py`.
+`.env` is ignored by git. The API key is only needed by code that calls the Claude API, such as `tools/llm_check.py`, which counts proposer-prompt tokens (`count`, free) or makes one real call (`call`).
 
 ### Checks
 

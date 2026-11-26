@@ -218,3 +218,7 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Generated run logs, LLM transcripts and the LLM reply cache
+/runs/
+/cache/
