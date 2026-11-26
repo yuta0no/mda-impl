@@ -122,10 +122,11 @@ def cma_design(
         U = U[:n_left]
         v = between_model_variance(U, weights, predictors, space=space)
         n_left -= U.shape[0]
-        score = np.where(np.isnan(v), -np.inf, v)
-        i = int(np.argmax(score))
-        if best_u is None or score[i] > best_v:
-            best_u, best_v = U[i], score[i]
+        finite = np.isfinite(score)
+        if finite.any():
+            i = int(np.argmax(score))
+            if best_u is None or score[i] > best_v:
+                best_u, best_v = U[i], score[i]
         if full:
             # pycma minimises; a NaN V ranks below every finite value
             es.tell(list(U), list(np.where(np.isnan(v), np.inf, -v)))
