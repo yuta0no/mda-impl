@@ -14,10 +14,9 @@ import numpy as np
 from jaxtyping import Int
 
 from mda.arrays import Conditions, ParamCounts, PerModel, Rates
-from mda.fit import REL_FLOOR, FitResult, Residual, fit, relative_residuals
+from mda.config import DEFAULTS, Residual
+from mda.fit import FitResult, fit, relative_residuals
 from mda.hypothesis import Hypothesis, Model, compile_hypothesis, normalise_expr
-
-N_STARTS = 8  # random starts per fit, on top of the warm start (D8)
 
 
 class Origin(StrEnum):
@@ -99,16 +98,20 @@ class Pool:
         y: Rates,
         *,
         rng: np.random.Generator,
-        n_starts: int = N_STARTS,
-        residual: Residual = "whitened",
-        rel_floor: float = REL_FLOOR,
+        n_starts: int = DEFAULTS.n_starts,
+        residual: Residual = DEFAULTS.residual,
+        rel_floor: float = DEFAULTS.rel_floor,
+        rho: float = DEFAULTS.rho,
+        sigma_floor: float = DEFAULTS.sigma_floor,
+        log_span: float = DEFAULTS.log_span,
     ) -> None:
         """Fit every candidate to all of (X, y), replacing its `fit` and `fit_err` (spec §3).
 
         Each fit runs `n_starts` random starts and, when the candidate has a fit, a warm start
         from its estimate (D8). The candidates draw from `rng` in pool order, so the result
         depends only on the pool, the data and `rng`'s state. `rel_floor` is the floor c of the
-        relative residual (D5). If a fit raises, the pool is left unchanged.
+        relative residual (D5); `rho`, `sigma_floor` and `log_span` are passed to `fit`. If a fit
+        raises, the pool is left unchanged.
         """
         refitted: list[Candidate] = []
         for c in self._candidates:
@@ -121,6 +124,9 @@ class Pool:
                 warm_start=None if c.fit is None else c.fit.theta,
                 residual=residual,
                 f=c.f,
+                rho=rho,
+                sigma_floor=sigma_floor,
+                log_span=log_span,
             )
             err = np.median(relative_residuals(y, res.y_hat, rel_floor)) if res.ok else math.inf
             refitted.append(replace(c, fit=res, fit_err=float(err)))

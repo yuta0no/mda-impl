@@ -8,7 +8,6 @@ hint of the expansion prompt (Alg. 12, D6).
 
 import warnings
 from dataclasses import dataclass
-from typing import Literal
 
 import numpy as np
 from jaxtyping import Float
@@ -17,12 +16,8 @@ from scipy.stats import ConstantInputWarning, spearmanr
 
 from mda.arrays import Conditions, Rates, Theta
 from mda.bench import INPUT_NAMES
+from mda.config import DEFAULTS, Residual
 from mda.hypothesis import Hypothesis, Model, compile_hypothesis
-
-RHO = 0.03  # relative noise scale of the whitening (spec §3, App. A.6.3)
-SIGMA_FLOOR = 0.01  # absolute floor of the whitening scale (spec §3, App. A.6.3)
-REL_FLOOR = 0.01  # floor c of the relative residual (D5)
-LOG_SPAN = 100.0  # bounds spanning more than two decades are optimised in log space (D8)
 
 # Inside the optimiser, non-finite residuals become this value and larger ones are clipped to it,
 # so a step into a region where the model overflows is rejected instead of aborting the start.
@@ -34,8 +29,6 @@ LOG_SPAN = 100.0  # bounds spanning more than two decades are optimised in log s
 # Final RSS values are never penalised.
 _PENALTY = 1e30
 
-type Residual = Literal["whitened", "log1p"]
-
 
 @dataclass(frozen=True)
 class FitResult:
@@ -45,20 +38,27 @@ class FitResult:
     ok: bool
 
 
-def sigma(y: Rates, rho: float = RHO, sigma_floor: float = SIGMA_FLOOR) -> Rates:
+def sigma(y: Rates, rho: float = DEFAULTS.rho, sigma_floor: float = DEFAULTS.sigma_floor) -> Rates:
     """Whitening scale sigma_n = max(rho |y_n|, sigma_floor) (eq. 46, spec §3)."""
     return np.maximum(rho * np.abs(y), sigma_floor)
 
 
-def residuals(y: Rates, y_hat: Rates, residual: Residual = "whitened") -> Rates:
+def residuals(
+    y: Rates,
+    y_hat: Rates,
+    residual: Residual = DEFAULTS.residual,
+    *,
+    rho: float = DEFAULTS.rho,
+    sigma_floor: float = DEFAULTS.sigma_floor,
+) -> Rates:
     """Residuals whose sum of squares is the RSS (D1).
 
-    `whitened` (default): (y - y_hat) / sigma(y). `log1p`: log1p(y) - log1p(y_hat), which is
-    non-finite when y_hat <= -1.
+    `whitened` (default): (y - y_hat) / sigma(y, rho, sigma_floor). `log1p`:
+    log1p(y) - log1p(y_hat), which is non-finite when y_hat <= -1 and does not use the scale.
     """
     with np.errstate(all="ignore"):
         if residual == "whitened":
-            return (y - y_hat) / sigma(y)
+            return (y - y_hat) / sigma(y, rho, sigma_floor)
         if residual == "log1p":
             return np.log1p(y) - np.log1p(y_hat)
     raise ValueError(f"unknown residual {residual!r}")
@@ -72,8 +72,11 @@ def fit(
     rng: np.random.Generator,
     n_starts: int,
     warm_start: Theta | None = None,
-    residual: Residual = "whitened",
+    residual: Residual = DEFAULTS.residual,
     f: Model | None = None,
+    rho: float = DEFAULTS.rho,
+    sigma_floor: float = DEFAULTS.sigma_floor,
+    log_span: float = DEFAULTS.log_span,
 ) -> FitResult:
     """Minimise the RSS of `h` on (X, y) within the bounds of `h.params` (spec §3, D8).
 
@@ -82,9 +85,9 @@ def fit(
     start with the smallest RSS; ties go to the earlier start, so the warm start wins them. All
     random starts are drawn before any optimisation, so the result depends only on `rng`'s state.
 
-    Parameters with `low > 0` and `high / low > LOG_SPAN` are optimised, and drawn, in log space.
+    Parameters with `low > 0` and `high / low > log_span` are optimised, and drawn, in log space.
     Parameters with `low == high` are held fixed. `f` is `compile_hypothesis(h)`; pass it to
-    avoid recompiling.
+    avoid recompiling. `rho` and `sigma_floor` set the whitening scale of `residuals`.
 
     Never raises for numerical problems: if no start reaches finite residuals, the result has
     `ok=False` and `rss=inf`. Caller errors raise `ValueError`: nothing to start from, a
@@ -95,7 +98,7 @@ def fit(
     lo = np.array([p.low for p in h.params], dtype=float)
     hi = np.array([p.high for p in h.params], dtype=float)
     free = lo < hi
-    log_free = (free & (lo > 0) & (hi > LOG_SPAN * lo))[free]
+    log_free = (free & (lo > 0) & (hi > log_span * lo))[free]
 
     # The optimiser works on z: the log of a log-space parameter, the value itself otherwise.
     # Only the log-space entries go through log and exp, because a linear-space bound can be zero
@@ -110,10 +113,13 @@ def fit(
 
     z_lo, z_hi = to_z(lo[free]), to_z(hi[free])
 
+    def res(y_hat: np.ndarray) -> np.ndarray:
+        return residuals(y, y_hat, residual, rho=rho, sigma_floor=sigma_floor)
+
     def evaluate(theta: np.ndarray) -> tuple[np.ndarray, float]:
         y_hat = f(theta, X)
         with np.errstate(over="ignore"):
-            rss = float(np.sum(residuals(y, y_hat, residual) ** 2))
+            rss = float(np.sum(res(y_hat) ** 2))
         return y_hat, rss if np.isfinite(rss) else np.inf
 
     if not free.any():
@@ -132,7 +138,7 @@ def fit(
         raise ValueError("no starts: pass n_starts > 0 or a warm_start")
 
     def fun(z: np.ndarray) -> np.ndarray:
-        r = residuals(y, f(to_theta(z), X), residual)
+        r = res(f(to_theta(z), X))
         return np.clip(np.where(np.isfinite(r), r, _PENALTY), -_PENALTY, _PENALTY)
 
     # Numerical problems never raise in `fun`, so whatever does is a caller error, such as an
@@ -156,7 +162,7 @@ def fit(
     return best
 
 
-def relative_residuals(y: Rates, y_hat: Rates, c: float = REL_FLOOR) -> Rates:
+def relative_residuals(y: Rates, y_hat: Rates, c: float = DEFAULTS.rel_floor) -> Rates:
     """Per-datum relative error |y - y_hat| / max(|y|, c), with F(y) = y (D5)."""
     with np.errstate(all="ignore"):
         return np.abs(y - y_hat) / np.maximum(np.abs(y), c)

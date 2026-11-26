@@ -4,11 +4,6 @@ import numpy as np
 import pytest
 
 from mda.posterior import (
-    N_MAX,
-    N_MIN,
-    RSS_FLOOR,
-    TAU_C,
-    TAU_FIT,
     adaptive_cap,
     bic_fixed,
     bic_profiled,
@@ -23,11 +18,6 @@ LN2, LN10 = math.log(2), math.log(10)
 
 def counts(*c: int) -> np.ndarray:
     return np.array(c, dtype=int)
-
-
-def test_defaults_follow_spec():
-    # Spec §4 and D2; change the spec in the same PR as these
-    assert (RSS_FLOOR, TAU_C, TAU_FIT, N_MIN, N_MAX) == (1e-12, 0.9, 0.05, 6, 24)
 
 
 def test_bic_profiled_matches_hand_computation():

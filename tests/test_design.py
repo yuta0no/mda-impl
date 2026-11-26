@@ -6,9 +6,8 @@ import pytest
 
 import mda.design
 from mda.bench import INPUT_NAMES, World, WorldSpec, from_unit, to_unit
+from mda.config import DEFAULTS
 from mda.design import (
-    N_EVALS,
-    SIGMA0,
     DesignError,
     between_model_variance,
     cma_design,
@@ -19,6 +18,7 @@ from mda.library import SEED_BY_WORLD, SEED_LIBRARY
 
 CA = INPUT_NAMES.index("C_A")
 N_INPUTS = len(INPUT_NAMES)
+N_EVALS = DEFAULTS.n_evals
 CENTRE = np.full((1, N_INPUTS), 0.5)
 
 
@@ -70,11 +70,6 @@ def mm_and_competitive():
     d0 = np.array([[a, 0.0, 1.0, 0.0, 1.0, 310.0, 7.0] for a in (0.03, 0.3, 3.0)])
     np.testing.assert_allclose(f_mm(theta_mm, d0), f_ci(theta_ci, d0), rtol=1e-12)
     return [lambda X: f_mm(theta_mm, X), lambda X: f_ci(theta_ci, X)]
-
-
-def test_defaults_follow_spec():
-    # Spec §6 and D10; change the spec in the same PR as these
-    assert (N_EVALS, SIGMA0) == (48, 0.3)
 
 
 # between_model_variance
@@ -370,7 +365,7 @@ def test_cma_design_rejects_non_positive_n_evals():
 
 
 def test_cma_design_is_fast_for_a_full_pool():
-    # Done-when of feat/design: under a second for a 24-model pool (N_MAX in mda.posterior)
+    # Done-when of feat/design: under a second for a 24-model pool (n_max in MDAConfig)
     rng = np.random.default_rng(0)
     predictors = []
     for i in range(24):

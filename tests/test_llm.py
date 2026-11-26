@@ -14,10 +14,9 @@ import httpx2
 import pytest
 from anthropic.types import Message
 
+from mda.config import DEFAULTS
 from mda.hypothesis import HYPOTHESES_SCHEMA, parse_hypotheses
 from mda.llm import (
-    DEFAULT_MAX_RETRIES,
-    DEFAULT_MAX_TOKENS,
     FREE,
     PRICING,
     ClaudeLLM,
@@ -346,18 +345,18 @@ def test_claude_model_and_pricing_can_be_set():
 
 def test_claude_max_tokens_over_the_sdk_limit_is_rejected_before_sending():
     # Requests are not streamed, and the SDK refuses a non-streaming request whose `max_tokens`
-    # could take over 10 minutes (about 21,300 tokens). DEFAULT_MAX_TOKENS stays under that
+    # could take over 10 minutes (about 21,300 tokens). The default `llm_max_tokens` stays under that
     api = FakeAPI(message())
     with pytest.raises(ValueError, match="Streaming is required"):
         claude(api, max_tokens=22_000).complete("s", "u")
     assert not api.requests
-    assert DEFAULT_MAX_TOKENS <= 21_000
+    assert DEFAULTS.llm_max_tokens <= 21_000
     assert claude(api, max_tokens=21_000).complete("s", "u").ok
 
 
 def test_claude_default_client_takes_max_retries(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
-    assert ClaudeLLM()._client.max_retries == DEFAULT_MAX_RETRIES
+    assert ClaudeLLM()._client.max_retries == DEFAULTS.llm_max_retries
     assert ClaudeLLM(max_retries=1)._client.max_retries == 1
 
 

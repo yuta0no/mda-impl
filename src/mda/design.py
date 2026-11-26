@@ -16,24 +16,20 @@ that averages over a model's particles instead.
 
 import warnings
 from collections.abc import Callable, Sequence
-from typing import Literal
 
 import numpy as np
 from jaxtyping import Float
 
 from mda.arrays import Condition, Conditions, PerModel, Rates
 from mda.bench import INPUT_NAMES, from_unit
+from mda.config import DEFAULTS, Space
 
 # pycma warns on import when matplotlib, which it only needs for plotting, is missing
 with warnings.catch_warnings():
     warnings.filterwarnings("ignore", message="Could not import matplotlib", category=UserWarning)
     import cma
 
-N_EVALS = 48  # objective evaluations per design (spec §6, App. B.2)
-SIGMA0 = 0.3  # initial CMA-ES step size in the unit box (D10)
-
 type Predictor = Callable[[Conditions], Rates]
-type Space = Literal["raw", "log1p"]
 
 UnitDesigns = Float[np.ndarray, "n 7"]  # conditions in the unit box, as `mda.bench.to_unit` maps
 Values = Float[np.ndarray, " n"]  # one objective value per design
@@ -50,7 +46,7 @@ def between_model_variance(
     weights: PerModel,
     predictors: Sequence[Predictor],
     *,
-    space: Space = "raw",
+    space: Space = DEFAULTS.design_space,
 ) -> Values:
     """V(a) = sum_m w_m (mu_m(a) - sum_m' w_m' mu_m'(a))^2 at each row a of `U` (App. B.2).
 
@@ -91,9 +87,9 @@ def cma_design(
     predictors: Sequence[Predictor],
     *,
     rng: np.random.Generator,
-    n_evals: int = N_EVALS,
-    sigma0: float = SIGMA0,
-    space: Space = "raw",
+    n_evals: int = DEFAULTS.n_evals,
+    sigma0: float = DEFAULTS.sigma0,
+    space: Space = DEFAULTS.design_space,
 ) -> Condition:
     """The next condition, in natural units: the CMA-ES maximiser of V(a) (Alg. 14, D10).
 

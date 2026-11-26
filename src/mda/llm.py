@@ -26,23 +26,13 @@ from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, ClassVar, Literal
+from typing import Any, ClassVar
 
 import anthropic
 from anthropic.types import OutputConfigParam
 
-DEFAULT_MODEL = "claude-haiku-5-5"  # spec §9
-DEFAULT_EFFORT = "medium"  # spec §9: the paper's model ran at medium reasoning effort
-# Room for adaptive thinking plus a reply of up to 12 hypotheses. Thinking tokens count against
-# this cap, and a non-streaming request must stay under the SDK's ~21K-token limit
-DEFAULT_MAX_TOKENS = 16_000
-# The SDK retries 408, 409, 429, 5xx and connection errors with exponential backoff. Its default of
-# 2 retries is short for an unattended run of several hours
-DEFAULT_MAX_RETRIES = 5
+from mda.config import DEFAULTS, ClaudeEffort
 
-# Claude's effort levels (`output_config.effort`). Other providers name and scale theirs differently,
-# so a new backend defines its own
-type ClaudeEffort = Literal["low", "medium", "high", "xhigh", "max"]
 type JSONSchema = dict[str, Any]
 
 
@@ -390,13 +380,13 @@ class ClaudeLLM(LLMClient):
 
     def __init__(
         self,
-        model: str = DEFAULT_MODEL,
+        model: str = DEFAULTS.llm_model,
         *,
-        effort: ClaudeEffort = DEFAULT_EFFORT,
-        max_tokens: int = DEFAULT_MAX_TOKENS,
+        effort: ClaudeEffort = DEFAULTS.llm_effort,
+        max_tokens: int = DEFAULTS.llm_max_tokens,
         pricing: Pricing | None = None,
         client: anthropic.Anthropic | None = None,
-        max_retries: int = DEFAULT_MAX_RETRIES,
+        max_retries: int = DEFAULTS.llm_max_retries,
         cache_dir: str | os.PathLike[str] | None = None,
         transcript: str | os.PathLike[str] | None = None,
     ) -> None:

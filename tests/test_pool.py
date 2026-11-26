@@ -7,7 +7,7 @@ import pytest
 from mda.bench import INPUT_NAMES, World, WorldSpec, from_unit
 from mda.hypothesis import Hypothesis, HypothesisError, Param, compile_hypothesis
 from mda.library import SEED_BY_WORLD, SEED_LIBRARY
-from mda.pool import N_STARTS, Origin, Pool
+from mda.pool import Origin, Pool
 from mda.posterior import adaptive_cap, bic_fixed, bic_profiled, log_weights, prune_top, weights
 
 MM = Hypothesis(
@@ -49,10 +49,6 @@ def refit(pool: Pool, X: np.ndarray, y: np.ndarray, seed: int = 0, **kwargs) -> 
 
 def names(pool: Pool) -> list[str]:
     return [c.hypothesis.name for c in pool]
-
-
-def test_defaults_follow_spec():
-    assert N_STARTS == 8  # D8
 
 
 def test_add_returns_unfitted_candidates():

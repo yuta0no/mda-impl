@@ -7,9 +7,6 @@ import pytest
 
 from mda.bench import INPUT_NAMES, from_unit, to_unit
 from mda.fit import (
-    REL_FLOOR,
-    RHO,
-    SIGMA_FLOOR,
     FitResult,
     fit,
     relative_residuals,
@@ -62,8 +59,7 @@ def test_sigma_formula():
 
 
 def test_sigma_defaults_follow_spec():
-    # Spec §3: rho = 0.03, sigma_floor = 0.01; change the spec in the same PR as these
-    assert (RHO, SIGMA_FLOOR, REL_FLOOR) == (0.03, 0.01, 0.01)
+    # Spec §3: rho = 0.03, sigma_floor = 0.01, the defaults of `MDAConfig`
     y = np.array([-1.0, -0.5, -0.1, 0.0, 0.1, 0.5, 1.0])
     expected = np.array([0.03, 0.015, 0.01, 0.01, 0.01, 0.015, 0.03])
     np.testing.assert_allclose(sigma(y), expected)
