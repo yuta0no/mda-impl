@@ -31,9 +31,10 @@ This is `main` with `feat/fit`, `feat/library`, `feat/posterior`, `feat/design`,
 | `mda.posterior` | `bic_profiled`, `bic_fixed`, `log_prior`, `log_weights`, `weights`, `prune_top`, `adaptive_cap` | `feat/posterior` |
 | `mda.design` | `between_model_variance`, `cma_design`, `random_design` | `feat/design` |
 | `mda.llm` | `LLMClient` (the provider-neutral base), `ClaudeLLM`, `FakeLLM`, `Reply`, `StopReason`, `Usage`, `Pricing`, `ReplyCache`; `HYPOTHESES_SCHEMA` in `mda.hypothesis` | `feat/llm-client` |
-| `tools/llm_check.py` | Counts proposer-prompt tokens, or makes one real call | `feat/llm-client` |
+| `tools/llm_check.py` | Counts proposer-prompt tokens, or makes one real call; renders the prompts with `mda.propose` since `feat/proposer` | `feat/llm-client`, `feat/proposer` |
 | `mda.config` | `MDAConfig`, every hyperparameter with its source, and `DEFAULTS`, from which the other modules read their keyword defaults | `feat/agent` |
 | `mda.propose` | The `Proposer` protocol, `Proposal`, `CallRecord` and `NullProposer` | `feat/agent` |
+| `mda.propose` | `LLMProposer`, `claude_proposer`, and the prompt: `render_prompt`, `SYSTEM_PROMPT`, `map_index`, `correlated_input` | `feat/proposer` |
 | `mda.agent` | `MDAAgent` (Alg. 2): `design`, `update_state`, `get_model`, `get_predictor` | `feat/agent` |
 | `mda.run` | `run_cell` (Alg. 1), `RunLog` and its JSON format, `passive_design`, `query_set` | `feat/agent` |
 | `prompts/chem_propose.txt` | The proposer prompt, verbatim from App. G.1 | — |
@@ -49,7 +50,7 @@ src/mda/
   config.py     feat/agent        MDAConfig: every hyperparameter, each citing the paper or a D-number (done)
   agent.py      feat/agent        MDAAgent: init, design, update_state, get_model, get_predictor (Alg. 2) (done)
   propose.py    feat/agent        Proposer protocol and NullProposer (done)
-                feat/proposer     LLMProposer: prompt rendering, parse, dedupe, retry
+                feat/proposer     LLMProposer: prompt rendering, parse, dedupe, retry (done)
   llm.py        feat/llm-client   LLM clients, reply cache, transcripts, usage and cost (done)
   run.py        feat/agent        run_cell: Alg. 1 for one (world, seed), with a JSON run log (done)
                 feat/runner       grid over worlds × seeds × arms, CLI, resume, manifest
@@ -86,7 +87,7 @@ flowchart TD
     posterior --> agent
     design --> agent
     agent --> runner["feat/runner"]
-    agent --> proposer["feat/proposer"]
+    agent --> proposer["feat/proposer (done)"]
     llmc --> proposer
     runner --> analysis["feat/analysis"]
     runner --> icl["feat/icl"]
@@ -102,7 +103,7 @@ flowchart TD
 There are three tracks, which can proceed in parallel:
 
 - **Numerics:** `feat/fit`, `feat/library`, `feat/posterior`, `feat/design` and `feat/agent` (done) → `feat/runner`.
-- **LLM:** `feat/llm-client` (done). `feat/proposer` can start now.
+- **LLM:** `feat/llm-client` and `feat/proposer` (done). Once `feat/runner` has merged too, the hybrid arm gets its registry entry and `configs/hybrid.json`, then the M2 pilot runs.
 - **Evaluation:** `feat/analysis`, `feat/icl` and `feat/smc` build on the run-log schema from `feat/agent`, which is fixed: `mda.run.RunLog`, schema 1.
 
 | # | Branch | Scope | Depends on | Milestone |
@@ -114,7 +115,7 @@ There are three tracks, which can proceed in parallel:
 | 5 | `feat/agent` (done) | MDA agent loop, predictive check, one-cell runner | 2, 3, 4 | M1 |
 | 6 | `feat/runner` | Grid runner, CLI, arm configs | 5 | M1 |
 | 7 | `feat/llm-client` (done) | LLM clients, reply cache, cost accounting | main | M2 |
-| 8 | `feat/proposer` | LLM proposer and the hybrid arm | 5, 7 | M2 |
+| 8 | `feat/proposer` (done) | LLM proposer and the hybrid arm's client | 5, 7 | M2 |
 | 9 | `feat/analysis` | Aggregation, bootstrap, figures | 6 | M3 |
 | 10 | `feat/icl` | ICL baselines | 6, 7 | M3 |
 | 11 | `feat/smc` | Tempered-SMC control | 3, 4 | M3 |
@@ -210,7 +211,7 @@ There are three tracks, which can proceed in parallel:
     - It took over the module constants of `mda/fit.py`, `mda/pool.py`, `mda/posterior.py`, `mda/design.py` and `mda/llm.py`. Those modules now read their keyword defaults from `DEFAULTS`, and `fit`, `residuals` and `Pool.refit` take $\rho$, $\sigma_{\mathrm{floor}}$ and the two-decade threshold as arguments.
     - The module imports nothing from `mda`, so every module can import it. It also holds the option types (`Residual`, `Bic`, `Check`, `Design`, `Space`, `ClaudeEffort`).
     - `to_dict` and `from_dict` convert to and from JSON-compatible values, for run logs and arm configs. Values that make no sense raise `ValueError`.
-    - The fields `n_init`, `n_new`, `max_attempts`, `structured_output` and `prompt_phase` are there for `feat/proposer`; nothing reads them yet.
+    - The fields `n_init`, `n_new`, `max_attempts`, `structured_output` and `prompt_phase` are there for `feat/proposer`, which reads them.
   - `mda/propose.py`: the `Proposer` protocol and `NullProposer`. The signature differs from the one planned, `propose(kind, pool, D, budget_left) -> list[Hypothesis]`, in three ways:
     - It is `propose(kind, pool, X, y, *, weights, budget_left)`. The weights identify the MAP form, which the D6 prompt fields refer to. At initialisation the pool holds the unfitted library and `weights` is `None`.
     - `pool` is a sequence of `Candidate`s, not the `Pool`: the agent passes a snapshot (a tuple), its data as arrays marked read-only, and a copy of its weights. A proposer therefore changes the pool only through the hypotheses it returns.
@@ -296,23 +297,35 @@ There are three tracks, which can proceed in parallel:
   - The whole request body, for `complete` and for `count_tokens`: the model, `max_tokens`, the effort, the schema in `output_config.format`, and nothing else, so no sampling parameters. A model other than the default reaches both requests.
   - The fake API's replies are validated against the SDK's own `Message` type, so a hand-written reply cannot drift from the real shape unnoticed.
   - A reply that follows `HYPOTHESES_SCHEMA` is one that `parse_hypotheses` accepts.
-- **Measured.** With `tools/llm_check.py`, the initialisation prompt is 504 tokens and the largest expansion prompt 3,512 (929 and 3,937 with the schema); see [api-cost-estimation.md](./api-cost-estimation.md). One real initialisation call returned 12 valid hypotheses with 0 rejected, using 2,711 output tokens and costing \$0.0015. Run again, it was replayed from the cache.
+- **Measured.** With `tools/llm_check.py`, on the stand-in prompts it rendered before `feat/proposer`, the initialisation prompt is 504 tokens and the largest expansion prompt 3,512 (929 and 3,937 with the schema); see [api-cost-estimation.md](./api-cost-estimation.md). One real initialisation call returned 12 valid hypotheses with 0 rejected, using 2,711 output tokens and costing \$0.0015. Run again, it was replayed from the cache.
 - **Done when** a single real call made by hand succeeds and is cached. Done.
 
-### 8. `feat/proposer`
+### 8. `feat/proposer` (done)
 
-- **Scope.** `LLMProposer` in `mda/propose.py`, implementing `Proposer.propose(kind, pool, X, y, *, weights, budget_left) -> Proposal`, where `pool` is a sequence of `Candidate`s and every argument is for reading only (§5):
-  - Renders the init and expand prompts. The template follows `chem_propose.txt`: the init prompt has no refining section, and the expand prompt adds the refining section and the budget/phase line, filled in as described in D6.
-  - Then `parse_hypotheses`, dedupe against the pool, and a cap at $N$ (12 at init, 6 per expansion), with the retry policy of D14.
-  - Calls `LLMClient.complete` with `schema=HYPOTHESES_SCHEMA` and a `call_id` per attempt, such as `<arm>/<world>/s<seed>/call<k>/try<a>`. Each retry needs a new `call_id`, because the cache would replay the unusable reply for the same one. The run log records the `call_id` and `request_id` of every attempt: return them as `Proposal.calls`.
-  - The request sizes, the retry limit and the D6 and D15 switches are the `MDAConfig` fields `n_init`, `n_new`, `max_attempts`, `prompt_phase` and `structured_output`.
-  - Wiring for the `hybrid` arm.
-- **Tests.**
-  - Snapshot tests of the rendered prompts.
-  - Parsing, dedupe and capping with `FakeLLM`.
-  - Retry on unusable replies, and fallback to the seeds when the initial batch is empty.
-- **Pilot.** Run the hybrid arm on about 6 worlds × 1 seed. Record tokens and cost, and update [api-cost-estimation.md](./api-cost-estimation.md) with the measured numbers before the full run.
-- **Done when** milestone M2 is reached.
+- **Scope.** `mda/propose.py`, as built, implementing `Proposer.propose(kind, pool, X, y, *, weights, budget_left) -> Proposal` (§5):
+  - `render_prompt(kind, pool, X, y, *, weights, budget_left, n, tau_fit, phase)` and `SYSTEM_PROMPT`: the user and system prompts of `chem_propose.txt`. The module reads the template when it is imported and splits it into its fixed lines; a file without the expected layout raises, so every fixed word of a prompt is the file's. The init prompt is the world description, the experiments and the request for $N$ laws. The expand prompt adds the refining section and, with `phase`, the budget/phase line. Spec §9 records how the D6 fields are filled: number formats, the order and form of the listed laws, failed fits, and the rule for each form's correlated input.
+  - `map_index(weights)`, the MAP candidate as `MDAAgent` chooses it (the largest weight, the first on ties, none when every weight is 0), and `correlated_input(X, y, y_hat)`, the input a residual correlates with most. Each listed form shows its own (App. G: "which input each residual correlates most with"), and the best form's line adds the template's advice, reworded for one input: "consider a factor in that variable".
+  - `LLMProposer(llm, *, call_prefix, config=DEFAULTS)`. `propose` asks for $N$ = `n_init` at initialisation and `n_new` at an expansion, and calls `llm.complete(SYSTEM_PROMPT, user, schema=..., call_id=...)` with `HYPOTHESES_SCHEMA` when `structured_output` is on (D15). Then `parse_hypotheses`, dedupe against the pool and within the reply by the pool's key (`normalise_expr`, D13), and the first $N$ in reply order. Invalid laws and duplicates therefore take no place.
+  - Retries (D14). A reply is unusable when it is not `ok` (`max_tokens`, a refusal or another stop reason) or raises `ProposalParseError`. The call is then made again, up to `max_attempts` attempts, after which the proposal is empty and, at initialisation, the pool is the seed library. A reply that parses is not retried, even when none of its laws is valid and new. `LLMError`, a request that failed, is raised.
+  - Call IDs are `<call_prefix>/call<kk>/try<a>`, such as `hybrid/c0_michaelis_menten/s0/call03/try1`: `kk` is the index of the `propose` call in the cell, 00 at initialisation, and `a` the attempt, from 1. `Proposal.calls` has one `CallRecord(call_id, request_id)` per attempt, in order. A call asking for 0 laws makes no request and still takes its index. One instance serves one cell: a first call that is not `"init"`, or a second `"init"`, raises `RuntimeError`, so a proposer reused across cells cannot write into another cell's cache entries.
+  - `claude_proposer(config, *, call_prefix, cache_dir=None, transcript=None)`: an `LLMProposer` over a `ClaudeLLM` built from the config's `llm_*` fields. A client cannot be pickled, so `feat/runner` calls it in each worker, with `call_prefix = "<arm>/<world>/s<seed>"`.
+  - `tools/llm_check.py` renders its prompts with `render_prompt`: the init prompt on $D_0$ of one world, and an expansion with no budget left, on 25 observations and a pool of 24 fitted forms.
+  - No new `MDAConfig` field: the request sizes, the retry limit and the D6 and D15 switches are the existing `n_init`, `n_new`, `max_attempts`, `prompt_phase` and `structured_output`, with `tau_fit` for the phase. The 4 significant digits of the prompt's numbers are part of its format (spec §9), a module constant.
+- **Deviation from the paper.** The correlation hint follows App. G's prose, not the template, which the paper describes inconsistently. Against the template as printed: an input for every form and not only the best, one input and never several, and the advice reworded and on the best form's line. See spec D6, §9 and §11, "Correlation hint".
+- **Remaining.**
+  - The `hybrid` arm in the runner's registry and `configs/hybrid.json`, once this branch and `feat/runner` have both merged.
+  - The pilot: run the hybrid arm on about 6 worlds × 1 seed, record tokens and cost, and update [api-cost-estimation.md](./api-cost-estimation.md) with the measured numbers before the full run. Its token counts are still those of the stand-in prompts.
+- **Tests.** `tests/test_propose.py`, 75 tests in about 7 s, and two rows of `tests/test_config.py` for the keyword defaults of `render_prompt`:
+  - Snapshots of a rendered init prompt and of an expand prompt whose pool has a MAP form that is not the one with the smallest residual, a failed fit, a form written over two lines with a comment, a tie at weight 0, and forms whose inputs tie, two-way and three-way, with negative correlations among them.
+  - The fixed lines of every prompt, read from the template file by the test without the module's parser, are the template's, in its order, with only the placeholders filled: for init, for expand, and for expand without the phase line.
+  - Every D6 field and switch: the experiments in data order with 4 significant digits; the forms by weight with ties in pool order; the MAP rule, also against a real agent whose two best weights tie; no best form and the `explore` phase when no fit is finite; each form's input taken from its own residual, whichever form is the best; the one-input rule with signs, ties, constant and non-finite residuals, and on the signed residual of the rate rather than of the log rate; no input on a failed fit, even one with finite predictions; the advice on the MAP form's line only, in its reworded form, never on another form's line and never as a separate line, and none without a MAP form or without a correlated input; a MAP form with a failed fit, which the agent cannot give, marked without advice; the phase against `tau_fit` on both sides and at equality; the budget; $N$; and each config switch reaching the request.
+  - Parsing, dedupe against the pool (up to formatting, at init and at expansion) and within the reply, a renamed parameter kept as new, and the cap applied after dedupe and after invalid laws are dropped.
+  - Retries: each unusable kind is retried under a new call ID with the same request; attempts run out at `max_attempts` (1, 2 and 4) with every attempt recorded; a reply that is empty, all invalid or all duplicates is not retried; `LLMError` is raised; and an initial batch that is unusable, or usable and empty, leaves the agent with the seed library.
+  - Call IDs and `CallRecord`s over a sequence of calls with retries, checked against the client's transcript; the one-cell guard; and $N = 0$, at init and at expansion.
+  - A `run_cell` of the hybrid arm with `LLMProposer(FakeLLM(...))` on `c93_fractal_competitive`, 2 experiments: the log shows each step's calls and request IDs, one retried attempt included, the laws added with their origin and budget, and prompts built from the agent's data, pool and budget. Rerun against the same cache directory, it sends no request and gives an identical log.
+  - `claude_proposer` passes each `llm_*` field, the cache directory and the transcript to the client.
+  - These were checked by breaking `propose.py` on purpose, one edit at a time, in two rounds. In the first, 69 edits, at least one test failed for every one, among them: the cap before dedupe, $N$ swapped between the two kinds or off by one, a call ID reused across attempts or differing between runs, a call index that skips calls with $N = 0$, retrying a usable reply, not retrying a reply that is not `ok` or does not parse, one attempt too few or too many, a lost request ID or attempt record, a swallowed `LLMError`, the MAP form taken last on ties, by residual or when every weight is 0, a prompt part present at init or missing at expansion, `prompt_phase`, `structured_output` or `tau_fit` ignored, the phase decided by `<` or by another form's residual, the budget off by one, the hint with one or three inputs, zero correlations, signed ranking, ties to the later input, another form's residual or the log rate, the forms in pool order, written as the LLM wrote them or with a failed fit shown as a residual, 6 significant digits, no dedupe or dedupe on the raw expression, and `claude_proposer` dropping any of its settings. Two of these survived the first version of the tests (the hint on the log rate, and an init prompt that lists the pool when given weights), and the tests were tightened. The hint then changed from the best form's one or two inputs to one input on every form's line, and 15 edits to the changed logic followed, each failing at least one test: two inputs shown, the best form's input on every line, a line's input from the first or the previous form's residual, the advice from another form, without a best form, without a correlated input or dropped, zero correlations kept, NaN ranked first, signed ranking, ties to the later input, an input on a failed fit, an input only on the best form's line, and the input on the log rate. The test of a failed fit with finite predictions was written for this round: a failed fit's predictions are usually non-finite, which would hide an input shown on its line. The advice then moved from a line of its own onto the best form's line, and 9 edits to that followed, each failing at least one test: the separate line still emitted, the advice on every form's line, on the first-listed form without a best form, without a correlated input, dropped, or in the template's wording, and the marker `(current best form)` lost, on the last-listed form, or on the first-listed form without a best form.
+- **Done when** milestone M2 is reached. The branch's part is done: a hybrid cell runs end to end on `FakeLLM` and replays from the cache. The arm config and the pilot remain (above).
 
 ### 9. `feat/analysis`
 
