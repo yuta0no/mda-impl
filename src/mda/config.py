@@ -9,8 +9,8 @@ This module imports nothing from `mda`, so every other module can import it. The
 (`Residual`, `Space`, ...) are defined here for the same reason.
 """
 
-from dataclasses import asdict, dataclass
-from typing import Any, Literal
+from dataclasses import asdict, dataclass, fields
+from typing import Any, Literal, TypeAliasType, get_args, get_origin
 
 type Residual = Literal["whitened", "log1p"]  # the residual whose sum of squares is the RSS (D1)
 type Bic = Literal["profiled", "fixed"]  # the noise scale of the BIC (spec §3)
@@ -83,6 +83,15 @@ class MDAConfig:
     prompt_phase: bool = True  # include the budget/phase line in the expansion prompt (D6)
 
     def __post_init__(self) -> None:
+        # Type annotations are not checked at runtime, so check each option field against the
+        # values its `Literal` alias lists
+        for f in fields(self):
+            if isinstance(f.type, TypeAliasType) and get_origin(f.type.__value__) is Literal:
+                allowed = get_args(f.type.__value__)
+                if getattr(self, f.name) not in allowed:
+                    raise ValueError(
+                        f"{f.name} must be one of {allowed}, got {getattr(self, f.name)!r}"
+                    )
         positive = (
             "rho",
             "sigma_floor",

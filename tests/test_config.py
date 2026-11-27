@@ -1,7 +1,9 @@
 import inspect
 import json
 from dataclasses import fields, replace
+from typing import TypeAliasType
 
+import jaxtyping
 import pytest
 
 from mda.config import DEFAULTS, MDAConfig
@@ -139,6 +141,32 @@ def test_from_dict_fills_missing_fields_and_rejects_unknown_ones():
 def test_invalid_values_raise(changes):
     with pytest.raises(ValueError):
         replace(DEFAULTS, **changes)
+
+
+@pytest.fixture
+def no_runtime_typecheck():
+    """Switch off the jaxtyping/beartype hook of pytest, so `MDAConfig` sees what a run sees."""
+    jaxtyping.config.update("jaxtyping_disable", True)
+    yield
+    jaxtyping.config.update("jaxtyping_disable", False)
+
+
+OPTIONS = [f.name for f in fields(MDAConfig) if isinstance(f.type, TypeAliasType)]
+
+
+def test_options_are_the_literal_fields():
+    assert set(OPTIONS) == {"residual", "bic", "check", "design", "design_space", "llm_effort"}
+
+
+@pytest.mark.parametrize("name", OPTIONS)
+@pytest.mark.usefixtures("no_runtime_typecheck")
+def test_unsupported_options_raise_at_load_time(name):
+    # Annotations are not checked at runtime, so `__post_init__` checks each option against its
+    # `Literal` alias: a bad manifest fails when it is loaded, not midway through a run
+    with pytest.raises(ValueError, match=name):
+        replace(DEFAULTS, **{name: "bogus"})
+    with pytest.raises(ValueError, match=name):
+        MDAConfig.from_dict({name: "bogus"})
 
 
 def test_boundary_values_are_allowed():
