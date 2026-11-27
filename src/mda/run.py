@@ -137,7 +137,8 @@ def run_cell(
 
     `world` is a benchmark world ID, and `seed` the replicate: it seeds the agent's fits and
     designs and the query set, not the world's noise (spec §1). `proposer` defaults to
-    `NullProposer`, the fixed-library arm, which makes no LLM call.
+    `NullProposer`, the fixed-library arm, which makes no LLM call. A proposer that holds a
+    config must hold `config`, which the log records: `MDAAgent` raises `ValueError` otherwise.
     """
     w = World(WorldSpec(world))
     proposer = NullProposer() if proposer is None else proposer

@@ -249,6 +249,29 @@ def test_a_proposal_that_does_not_compile_is_the_proposers_error():
         agent_on_d0(proposer=FakeProposer(init=[bad]))
 
 
+class ConfiguredProposer(FakeProposer):
+    """A fake proposer that holds a config, as a proposer reading hyperparameters does."""
+
+    def __init__(self, config, init=()):
+        super().__init__(init=init)
+        self.config = config
+
+
+def test_proposer_holding_another_config_is_refused():
+    # A cell has one config, the one the run log records
+    proposer = ConfiguredProposer(replace(FAST, n_new=2, tau_fit=0.1), init=[HILL])
+    with pytest.raises(ValueError, match=r"config differs .*\['n_new', 'tau_fit'\]"):
+        agent_on_d0(proposer=proposer)
+    assert proposer.asked == []  # refused before the initialisation call
+    # An equal config is the same config, whichever object holds it
+    same = ConfiguredProposer(replace(FAST), init=[HILL])
+    assert names(agent_on_d0(proposer=same)) == ["michaelis_menten", "hill"]
+    assert len(same.asked) == 1
+    # A `config` that is not an `MDAConfig` is the proposer's own business
+    other = ConfiguredProposer({"n_new": 2}, init=[HILL])
+    assert names(agent_on_d0(proposer=other)) == ["michaelis_menten", "hill"]
+
+
 # update_state: data and scoring (Alg. 2, Alg. 9)
 
 

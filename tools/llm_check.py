@@ -3,10 +3,10 @@
     uv run python tools/llm_check.py count   # free: the official count_tokens endpoint
     uv run python tools/llm_check.py call    # one real call (under $0.01), cached under cache/
 
-Both read ANTHROPIC_API_KEY from `.env`. The prompts are stand-ins rendered from the
-`chem_propose.txt` template with realistic data, until `feat/proposer` adds the real renderer.
-`count` measures the smallest prompt (the init call, 3 observations, no refining section) and
-the largest (an expansion at the last step: 25 observations and a full pool of 24 forms).
+Both read ANTHROPIC_API_KEY from `.env`. The prompts are rendered by `mda.propose.render_prompt`
+from realistic data, the observations of one world. `count` measures the smallest prompt (the
+init call, 3 observations, no refining section) and the largest (an expansion at the last step:
+25 observations and a full pool of 24 fitted forms, with the budget/phase line).
 """
 
 import argparse
@@ -16,90 +16,61 @@ from pathlib import Path
 import numpy as np
 from dotenv import load_dotenv
 
-from mda.bench import INPUT_NAMES, World, WorldSpec, from_unit
-from mda.hypothesis import HYPOTHESES_SCHEMA, parse_hypotheses
+from mda.bench import World, WorldSpec, from_unit
+from mda.config import DEFAULTS
+from mda.hypothesis import HYPOTHESES_SCHEMA, Hypothesis, Param, parse_hypotheses
 from mda.library import SEED_LIBRARY
 from mda.llm import ClaudeLLM, LLMClient
+from mda.pool import Origin, Pool
+from mda.posterior import bic_profiled, weights
+from mda.propose import SYSTEM_PROMPT, render_prompt
+from mda.run import passive_design
 
-SYSTEM = (
-    "You are an enzyme kineticist proposing candidate rate laws to explain assay data. "
-    "Reply JSON only."
-)
-CONTEXT = (
-    "An enzyme catalyses a reaction with initial rate r0 [mM/min]. Controllable inputs: "
-    "C_A [substrate, mM], C_I [inhibitor, mM], C_B [2nd substrate, mM], C_P [product, mM], "
-    "Enz [enzyme, mg/mL], T [K], pH. Discover an algebraic law "
-    "r0 = f(C_A,C_I,C_B,C_P,Enz,T,pH; theta) from the data."
-)
-SPEC = (
-    "Each 'expr' is a Python expression in the 7 input names + your declared params, using only "
-    "+ - * / ** and exp, log, sqrt. Give physically plausible positive param bounds. JSON schema: "
-    '{"hypotheses":[{"name":str,"expr":str,"params":[{"name":str,"low":float,"high":float}]}]}'
-)
 # The repository root: `cache/` and `runs/` are git-ignored there, wherever the tool is run from
 ROOT = Path(__file__).resolve().parents[1]
 WORLD = "c10_mm_competitive_arrhenius"
-# Passive data D0 (spec §1): C_A in {0.03, 0.3, 3}, other inputs at (0, 1, 0, 1, 310, 7)
-D0 = np.array([[a, 0.0, 1.0, 0.0, 1.0, 310.0, 7.0] for a in (0.03, 0.3, 3.0)])
 
 
-def experiments(n: int) -> str:
+def data(n: int) -> tuple[np.ndarray, np.ndarray]:
     """`n` observations of `WORLD`: D0, then random conditions standing in for designed ones."""
     world = World(WorldSpec(WORLD))
-    X = np.vstack([D0, from_unit(np.random.default_rng(0).uniform(size=(n - 3, 7)))])
-    lines = []
-    for x in X:
-        inputs = ", ".join(f"{name}={v:.4g}" for name, v in zip(INPUT_NAMES, x, strict=True))
-        lines.append(f"  {inputs} -> r0={world.observe(x):.6g}")
-    return "\n".join(lines)
+    X = np.vstack([passive_design(), from_unit(np.random.default_rng(0).uniform(size=(n - 3, 7)))])
+    return X, np.array([world.observe(x) for x in X])
 
 
-def pool_forms(n: int) -> list[str]:
+def pool_forms(n: int) -> list[Hypothesis]:
     """`n` distinct forms: the seeds, then the seeds with an extra inhibition or Arrhenius factor."""
-    seeds = [h.expr for h in SEED_LIBRARY]
-    forms = seeds + [f"({e}) / (1 + C_I/Ki)" for e in seeds]
-    forms += [f"({e}) * exp(-Ea/(8.314*T))" for e in seeds]
+    extras = [
+        ("inhibited", "/ (1 + C_I/Ki)", Param("Ki", 1e-3, 1e3)),
+        ("arrhenius", "* exp(-Ea/(8.314*T))", Param("Ea", 1e3, 2e5)),
+    ]
+    forms = list(SEED_LIBRARY)
+    for tag, factor, param in extras:
+        for h in SEED_LIBRARY:
+            # A seed that already has the parameter shares it with the factor
+            params = h.params + tuple(
+                p for p in [param] if p.name not in {q.name for q in h.params}
+            )
+            forms.append(Hypothesis(f"{h.name}_{tag}", f"({h.expr}) {factor}", params))
     return forms[:n]
 
 
 def init_prompt() -> str:
-    return "\n\n".join(
-        [
-            CONTEXT,
-            "Experiments (inputs -> r0):\n" + experiments(3),
-            "Propose 12 distinct plausible rate laws (or refinements of those tried).\n" + SPEC,
-        ]
+    X, y = data(3)
+    # The init prompt does not show the pool
+    return render_prompt(
+        "init", (), X, y, weights=None, budget_left=DEFAULTS.n_active, n=DEFAULTS.n_init
     )
 
 
 def expand_prompt(n_obs: int = 25, n_forms: int = 24) -> str:
-    rng = np.random.default_rng(1)
-    residuals = "\n".join(
-        f"  {e}  -- median relative residual {r:.3f}"
-        for e, r in zip(pool_forms(n_forms), rng.uniform(0.05, 2.0, n_forms), strict=True)
-    )
-    refining = (
-        "Forms ALREADY TRIED (in the pool) and their residuals -- do NOT re-propose any of these; "
-        "propose forms STRUCTURALLY DIFFERENT from all of them:\n"
-        + residuals
-        + "\n  The best form's residual correlates most with: T, pH -- consider a factor in "
-        "those variable(s).\n"
-        "Refine by proposing a DIFFERENT algebraic form -- do NOT patch with ad-hoc "
-        "offset/softening terms."
-    )
-    budget = (
-        "Experiment budget remaining: 1. Current phase: explore (explore = restructure the form; "
-        "refine = tune an adequate form)."
-    )
-    return "\n\n".join(
-        [
-            CONTEXT,
-            "Experiments (inputs -> r0):\n" + experiments(n_obs),
-            refining,
-            budget,
-            "Propose 6 distinct plausible rate laws (or refinements of those tried).\n" + SPEC,
-        ]
-    )
+    """The prompt of an expansion after the last experiment, when no budget is left."""
+    X, y = data(n_obs)
+    pool = Pool()
+    pool.add(pool_forms(n_forms), Origin.SEED, added_at=n_obs)
+    pool.refit(X, y, rng=np.random.default_rng(0), n_starts=1)
+    w = weights(bic_profiled(pool.rss, pool.n_free, n_obs))
+    return render_prompt("expand", tuple(pool), X, y, weights=w, budget_left=0, n=DEFAULTS.n_new)
 
 
 def count(llm: LLMClient) -> None:
@@ -109,14 +80,16 @@ def count(llm: LLMClient) -> None:
         ("init (3 obs)", init_prompt()),
         ("expand (25 obs, 24 forms)", expand_prompt()),
     ]:
-        plain = llm.count_tokens(SYSTEM, user)
-        with_schema = llm.count_tokens(SYSTEM, user, schema=HYPOTHESES_SCHEMA)
-        print(f"{name:<28} {len(SYSTEM) + len(user):>6} {plain:>7} {with_schema:>9}")
+        plain = llm.count_tokens(SYSTEM_PROMPT, user)
+        with_schema = llm.count_tokens(SYSTEM_PROMPT, user, schema=HYPOTHESES_SCHEMA)
+        print(f"{name:<28} {len(SYSTEM_PROMPT) + len(user):>6} {plain:>7} {with_schema:>9}")
 
 
 def call(llm: LLMClient) -> None:
     for attempt in ("first", "second"):
-        reply = llm.complete(SYSTEM, init_prompt(), schema=HYPOTHESES_SCHEMA, call_id="smoke/init")
+        reply = llm.complete(
+            SYSTEM_PROMPT, init_prompt(), schema=HYPOTHESES_SCHEMA, call_id="smoke/init"
+        )
         print(
             f"{attempt} call: cached={reply.cached} stop={reply.stop_reason} "
             f"request_id={reply.request_id} usage={reply.usage} cost=${reply.cost:.5f}"
