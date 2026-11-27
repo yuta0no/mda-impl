@@ -7,9 +7,6 @@ import pytest
 
 from mda.bench import INPUT_NAMES, from_unit, to_unit
 from mda.fit import (
-    REL_FLOOR,
-    RHO,
-    SIGMA_FLOOR,
     FitResult,
     fit,
     relative_residuals,
@@ -62,8 +59,7 @@ def test_sigma_formula():
 
 
 def test_sigma_defaults_follow_spec():
-    # Spec §3: rho = 0.03, sigma_floor = 0.01; change the spec in the same PR as these
-    assert (RHO, SIGMA_FLOOR, REL_FLOOR) == (0.03, 0.01, 0.01)
+    # Spec §3: rho = 0.03, sigma_floor = 0.01, the defaults of `MDAConfig`
     y = np.array([-1.0, -0.5, -0.1, 0.0, 0.1, 0.5, 1.0])
     expected = np.array([0.03, 0.015, 0.01, 0.01, 0.01, 0.015, 0.03])
     np.testing.assert_allclose(sigma(y), expected)
@@ -189,6 +185,17 @@ def test_deterministic_for_a_given_rng():
     a, b = run(HILL, X, y, seed=7), run(HILL, X, y, seed=7)
     np.testing.assert_array_equal(a.theta, b.theta)
     assert a.rss == b.rss
+
+
+def test_result_arrays_are_read_only():
+    # A result is shared by reference, e.g. by every snapshot of a pool
+    X, y = data(MM, MM_TRUE)
+    fixed = Hypothesis("mm", MM.expr, (Param("Vmax", 2.5, 2.5), Param("Km", 0.7, 0.7)))
+    for res in (run(MM, X, y), run(fixed, X, y, n_starts=0)):
+        with pytest.raises(ValueError, match="read-only"):
+            res.theta[0] = 1.0
+        with pytest.raises(ValueError, match="read-only"):
+            res.y_hat[0] = 1.0
 
 
 def test_warm_start_is_the_initial_point():

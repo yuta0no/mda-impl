@@ -16,16 +16,11 @@ import numpy as np
 from jaxtyping import Float, Int
 
 from mda.arrays import ParamCounts, PerModel
-
-RSS_FLOOR = 1e-12  # floor of RSS / N in the profiled-scale BIC (D2)
-TAU_C = 0.9  # the cap drops when the largest weight exceeds this (spec §4, App. B.2)
-TAU_FIT = 0.05  # ... and the MAP model's median relative residual is at most this
-N_MIN = 6  # the dropped cap
-N_MAX = 24  # the cap otherwise
+from mda.config import DEFAULTS
 
 
 def bic_profiled(
-    rss: PerModel, n_params: ParamCounts, n: int, rss_floor: float = RSS_FLOOR
+    rss: PerModel, n_params: ParamCounts, n: int, rss_floor: float = DEFAULTS.rss_floor
 ) -> PerModel:
     """Profiled-scale BIC, N log(RSS / N) + C log N (spec §3, Alg. 8).
 
@@ -44,7 +39,7 @@ def bic_fixed(rss: PerModel, n_params: ParamCounts, n: int) -> PerModel:
     return np.where(np.isfinite(rss), rss + n_params * np.log(n), np.inf)
 
 
-def log_prior(n_params: ParamCounts, lam: float = 0.0) -> PerModel:
+def log_prior(n_params: ParamCounts, lam: float = DEFAULTS.lam) -> PerModel:
     """Unnormalised log of the structure prior p(m) ∝ exp(-lam C_m) (spec §3).
 
     `lam` is 0 in the BIC arm (Table 2), a uniform prior, and 2 in the SMC control (spec §8).
@@ -92,10 +87,10 @@ def adaptive_cap(
     w: PerModel,
     fit_err: float,
     *,
-    tau_c: float = TAU_C,
-    tau_fit: float = TAU_FIT,
-    n_min: int = N_MIN,
-    n_max: int = N_MAX,
+    tau_c: float = DEFAULTS.tau_c,
+    tau_fit: float = DEFAULTS.tau_fit,
+    n_min: int = DEFAULTS.n_min,
+    n_max: int = DEFAULTS.n_max,
 ) -> int:
     """Pool-size cap after an update (Alg. 10; spec §4).
 

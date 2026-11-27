@@ -34,6 +34,11 @@ LOG_AXES = np.array([n in CHEM_LOG_VARS for n in INPUT_NAMES])
 NOISE = 0.01  # multiplicative noise (1% of the true value)
 DIFFICULTY = "medium"
 
+# the benchmark's fixed test grid, `World.heldout(TEST_SEED, N_TEST)`: the set the upstream
+# `evaluate_law` scores on, and the one RMSLE and the pass criterion use (App. B.1)
+TEST_SEED = 42
+N_TEST = 1000
+
 # settings not explicitly specified in the MDA paper
 LAW_VERSION = "v0"
 GRAMMAR_MODE = "none"  # not relevant to MDA

@@ -6,6 +6,8 @@ import pytest
 from mda.bench import (
     BOUNDS,
     LOG_AXES,
+    N_TEST,
+    TEST_SEED,
     World,
     WorldSpec,
     canonical_worlds,
@@ -99,7 +101,7 @@ def test_ground_truth_law_scores_zero(domain):
     # our truth + held-out set + metric give the same score
     namespace: dict[str, Any] = {"np": np}
     exec(law_str, namespace)
-    X = world.heldout(seed=42, n=1000)  # same seed and n as `world.oracle.evaluate_law`
+    X = world.heldout(TEST_SEED, N_TEST)  # the set `world.oracle.evaluate_law` scores on
     y_pred = np.array([namespace["discovered_law"](*row) for row in X.tolist()], dtype=float)
     assert rmsle(y_pred=y_pred, y_true=world.truth(X)) == pytest.approx(
         upstream["rmsle"], abs=1e-12
