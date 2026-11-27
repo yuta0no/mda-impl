@@ -33,7 +33,7 @@ for k in 1..22:
 
 ## 2. Hypotheses and the seed library
 
-A hypothesis is an algebraic rate law $r_0 = f(C_A, C_I, C_B, C_P, \mathrm{Enz}, T, \mathrm{pH}; \theta)$ whose parameters have names and bounds. This is the JSON format of the proposer prompt, and `mda.hypothesis` already parses and compiles it. The parameter prior is uniform over the declared bounds (App. A.4).
+A hypothesis is an algebraic rate law $r_0 = f(C_A, C_I, C_B, C_P, \mathrm{Enz}, T, \mathrm{pH}; \theta)$ whose parameters have names and bounds. This is the JSON format of the proposer prompt, and `mda.hypothesis` already parses and compiles it. The parameter prior is uniform over the declared bounds (App. A.4). Only the SMC control uses a prior, and there we deviate from the paper's for wide bounds (D18).
 
 The seed library is "nine canonical executable laws" (App. B.2). We take these to be the forms of the nine canonical benchmark worlds, which `mda.bench.canonical_worlds()` returns (the benchmark excludes `c4_ph_activity`). Parameter names are those of the vendored oracle, so fitted values compare with a world's constants by name:
 
@@ -99,7 +99,7 @@ Sources: App. B.2 (the objective $V(a)$) and App. A.9 (Alg. 14).
 
 $$V(a) = \sum_m p(m \mid D) \Big(\bar\mu_m(a) - \sum_{m'} p(m' \mid D)\, \bar\mu_{m'}(a)\Big)^2$$
 
-In the BIC arm, $\bar\mu_m(a) = f_m(a; \hat\theta_m)$. $V(a)$ is the model-disagreement surrogate for expected information gain, without the noise whitening.
+In the BIC arm, $\bar\mu_m(a) = f_m(a; \hat\theta_m)$. In the SMC control it is the average of $f_m(a; \theta_i)$ over the model's particles (Eq. 60). $V(a)$ is the model-disagreement surrogate for expected information gain, without the noise whitening.
 
 - **Optimiser.** CMA-ES with 48 objective evaluations per round on the normalised 7-d box. The paper says the "concentration and enzyme axes are mapped logarithmically and temperature and pH linearly". `mda.bench.to_unit` and `from_unit` follow the benchmark instead: $C_A$, $C_B$ and $\mathrm{Enz}$ are logarithmic, and $C_I$ and $C_P$ are linear because their lower bound is 0. Batch size is 1, and the pool is refitted before the next design.
 - **Random-design control.** Draw uniformly in the unit box, the same distribution as `World.heldout`.
@@ -129,6 +129,16 @@ Sources: App. B.1, App. B.4, Fig. 2 caption.
 
 The controls in Fig. 7 (random design, fixed-scale BIC, SMC) use 12 predeclared worlds × 3 seeds, with 3 + 12 observations. The paper does not name the 12 worlds.
 
+**The SMC control.** A model-posterior step (Alg. 9) runs tempered SMC (Alg. 6, D18) for every candidate, where the primary arm runs the least-squares fit. Each run uses all the data and starts from the prior. Three things then differ from the primary arm:
+
+- **Weights.** $p(m \mid D) = \mathrm{softmax}_m(\log \hat Z_m - 2 C_m)$, with the SMC estimate of the log evidence in place of $-\mathrm{BIC}_m / 2$.
+- **Design.** $\bar\mu_m(a)$ in $V(a)$ is the average over the model's particles (§6).
+- **Point estimate.** $\hat\theta_m$ is the model's best-fitting particle (D21). The prediction, the predictive check and the adaptive cap use it as the primary arm uses its least-squares estimate.
+
+The pool, the expansion gate, the cap and the design search are otherwise the primary arm's. In `MDAConfig` the control is `evidence = "smc"` with `lam = 2`.
+
+**Deviation from the paper.** The control's parameter prior is not the paper's for a parameter whose bounds span more than two decades: it is uniform in $\log\theta$ (D18). The evidence, and with it the comparison with the paper's SMC numbers, is to be read with that in mind.
+
 Table 1 reports MDA's RMSLE at $B = 15$ on three worlds: 0.002 (Michaelis–Menten), 0.033 (MM + competitive inhibition + Arrhenius) and 0.115 (fractal kinetics, a fail).
 
 ## 9. LLM
@@ -150,7 +160,7 @@ Each default below is ours. In code, put it in `MDAConfig` with a comment naming
 | D5 | Which predictive-check variant, which target $F$, and which floor $c$? | The variant the executed ChemBench agent used: cached residuals from the preceding fit, that is the MAP model's in-sample median relative residual, which the new datum does not enter. Relative error on the raw rate ($F(y) = y$) with $c = 0.01$. Back-testing (Alg. 13) applies to the prequential variant only | The prequential variant of Alg. 13 |
 | D6 | Prompt fields the template leaves open | Residual list: each pool form with its in-sample median relative residual. Correlation hint: the one or two inputs with the largest absolute Spearman correlation between the MAP model's signed residual and the input in unit coordinates. Budget: $K - k$. Phase: `refine` if the MAP model's median relative residual is at most $\tau_{\mathrm{fit}}$, otherwise `explore` | Omit the phase line, which the template marks as optional |
 | D7 | Seed-law parameter bounds | Set from physical scales and the input box, not from the worlds' constants: `kcat` and `kcat_ref` $[10^{-3}, 10^{3}]$; `Km`, `Ki`, `Kp`, `KmA`, `KmB`, `K_half` $[10^{-3}, 10^{3}]$ mM; `n` $[0.1, 8]$; `Ea` $[10^{3}, 2 \times 10^{5}]$ J/mol. A test then checks, without tuning, that the nine canonical worlds' constants fall inside | — |
-| D8 | Multistart settings | `scipy.optimize.least_squares` (`method="trf"`) with bounds. Parameters whose bounds span more than two decades are optimised in log space. 8 starts drawn from the bounds, plus a warm start from the previous step's $\hat\theta$. The RNG is seeded by (cell seed, step, stream), with one stream for the fits of a step and one for its design | — |
+| D8 | Multistart settings | `scipy.optimize.least_squares` (`method="trf"`) with bounds. Parameters whose bounds span more than two decades are optimised in log space. 8 starts drawn from the bounds, plus a warm start from the previous step's $\hat\theta$. The RNG is seeded by (cell seed, step, stream), with one stream for the fits of a step and one for its design. In the SMC control, the fit stream drives the SMC runs | — |
 | D9 | In which space is $V(a)$ computed? | Raw rate, as written in App. B.2 | $\log(1 + y)$, which weights low-rate regions more |
 | D10 | CMA-ES settings | pycma with mean at the box centre, $\sigma_0 = 0.3$, default population size (9 in 7-d) and bounds $[0, 1]^7$, stopped after exactly 48 evaluations: 5 generations of 9 and 3 points of a sixth, ignoring pycma's own termination criteria. Return the best point evaluated, not the final mean | — |
 | D11 | Query-set seeding | 60 conditions from `World.heldout`, seeded from (world, seed) with `zlib.crc32` of `"<world>:<seed>"` (not the salted `hash`). All arms share them, and the seed is independent of the fitting and design RNG | — |
@@ -160,9 +170,10 @@ Each default below is ours. In code, put it in `MDAConfig` with a comment naming
 | D15 | Output format | Structured outputs (`output_config.format`) with the hypotheses JSON schema, leaving the prompt text unchanged. `parse_hypotheses` still validates every expression | The plain prompt, as in the paper |
 | D16 | ICL prompts | ICL (+MDA design): the paper's generic ICL forecaster template (App. G.2, BoxingGym) with the ChemBench world description from `chem_propose.txt`, predicting the 60 queries. ICL (+LLM design): ask for one condition inside the input bounds. After one format-only retry, a malformed reply becomes a random condition. A missing or unparseable forecast counts as a failure | — |
 | D17 | Reproducibility of LLM calls | Cache each reply keyed by (arm, world, seed, call index, attempt, hash of the prompt and the model settings), so a rerun replays the reply instead of querying again. The attempt is in the key so that a D14 retry is a new query, not a replay of the unusable reply | — |
-| D18 | SMC settings not given: target ESS fraction $\eta$, moves per rung $R_p$, rung cap $J_p$, the resampling scheme and the noise scale | $\eta = 0.5$, $R_p = 5$, $J_p = 100$. Proposals outside the bounds are rejected. The proposal scale is half the per-coordinate particle standard deviation, floored at $10^{-3}$ before scaling (Alg. 6 caption). Resampling is systematic, at every rung. The likelihood is Gaussian on the whitened raw residual (D1), with the $\sigma_n$ of §3. Every update runs from the prior on all the data. If most prior draws have likelihood 0, so that no step reaches the ESS target, the first rung takes the smallest possible step, which only removes them | A prior uniform in $\log\theta$ for a parameter whose bounds span more than two decades, moved in $\log\theta$ (`log_span`). Under the uniform prior, the evidence estimate fails on the D7 bounds ([blueprint §11](./blueprint.md#11-featsmc-library-done)) |
+| D18 | SMC settings not given: target ESS fraction $\eta$, moves per rung $R_p$, rung cap $J_p$, the resampling scheme and the noise scale. Also the parameter prior, which the paper gives and we change | $\eta = 0.5$, $R_p = 5$, $J_p = 100$. Proposals outside the bounds are rejected. The proposal scale is half the per-coordinate particle standard deviation, floored at $10^{-3}$ before scaling (Alg. 6 caption). Resampling is systematic, at every rung. The likelihood is Gaussian on the whitened raw residual (D1), with the $\sigma_n$ of §3. Every update runs from the prior on all the data. If most prior draws have likelihood 0, so that no step reaches the ESS target, the first rung takes the smallest possible step, which only removes them. **Prior, a deviation from the paper:** a parameter whose bounds span more than two decades (the threshold of D8) has a prior uniform in $\log\theta$ and is moved in $\log\theta$. The other parameters keep the paper's prior, uniform over the bounds (App. A.4). Under the paper's prior the evidence estimate fails on the D7 bounds, which span six decades: with the fixed library at $B = 15$ on the canonical worlds, the control passed 19 of 27 cells, against 26 with this prior and 27 for the BIC arm ([blueprint §11](./blueprint.md#11-featsmc-built-parked)) | The paper's prior, uniform over the bounds whatever their span: `param_prior = "uniform"` |
 | D19 | Estimator for paired ratios between two methods | Average the paired log-ratios of the seeds within each world, take the mean over worlds, exponentiate, and bootstrap worlds | Ratio of the two methods' aggregated curves |
 | D20 | Does a parameter whose bounds coincide count towards $C_m$? | No. $C_m$ counts the free parameters, those with `low < high`. The fit holds a parameter with `low == high` fixed, so it adds no flexibility to penalise | — |
+| D21 | What is $\hat\theta_m$ in the SMC control? Alg. 2, 10 and 13 predict, measure the fit error and run the predictive check at a point estimate, and the paper does not say how one comes from particles | The particle with the largest likelihood among the model's final particles. It is a draw from the posterior near its mode, not the mode itself. The paper's default predictor is a plug-in (Alg. 2), so the control does not average its prediction over particles or models (Eq. 18). No least-squares fit runs in the control | — |
 
 ## 11. Inconsistencies and pitfalls in the paper
 
