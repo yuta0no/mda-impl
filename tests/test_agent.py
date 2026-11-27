@@ -17,6 +17,7 @@ from mda.pool import Candidate, Origin, Pool
 from mda.posterior import bic_fixed, bic_profiled
 from mda.posterior import weights as bic_weights
 from mda.propose import CallRecord, NullProposer, Proposal
+from mda.smc import SMCResult, log_model_weights, particle_predictor
 
 MM = Hypothesis(
     "michaelis_menten",
@@ -189,6 +190,20 @@ def refits(monkeypatch: pytest.MonkeyPatch) -> list[SimpleNamespace]:
         return refit(self, X, y, **kwargs)
 
     monkeypatch.setattr(Pool, "refit", spy)
+    return seen
+
+
+@pytest.fixture
+def smc_refits(monkeypatch: pytest.MonkeyPatch) -> list[SimpleNamespace]:
+    """Every `Pool.refit_smc` call made during the test, as `refits` records `Pool.refit`."""
+    seen: list[SimpleNamespace] = []
+    refit_smc = Pool.refit_smc
+
+    def spy(self, X, y, **kwargs):
+        seen.append(SimpleNamespace(n=len(y), settings=kwargs))
+        return refit_smc(self, X, y, **kwargs)
+
+    monkeypatch.setattr(Pool, "refit_smc", spy)
     return seen
 
 
@@ -1000,3 +1015,254 @@ def test_global_random_state_is_not_used():
     np.testing.assert_array_equal(np.random.get_state()[1], before)  # noqa: NPY002
     np.random.seed(1)  # noqa: NPY002
     np.testing.assert_array_equal(self_driven(seed=3, n=2).X, a.X)
+
+
+# The SMC control (spec §8): tempered-SMC evidence in place of the BIC
+
+# Laws in boxes that a few dozen particles can search, each narrower than the two decades from
+# which the prior turns log-uniform (D18), so the prior is the paper's. Under it, the bounds of
+# the laws above, six decades wide, are beyond a tempered SMC (blueprint §11)
+MM_BOX = Hypothesis(
+    "michaelis_menten",
+    "Vmax * C_A / (Km + C_A)",
+    (Param("Vmax", 1.0, 10.0), Param("Km", 0.1, 5.0)),
+)
+HILL_BOX = Hypothesis(
+    "hill",
+    "Vmax * C_A**n / (K**n + C_A**n)",
+    (Param("Vmax", 1.0, 10.0), Param("K", 0.1, 5.0), Param("n", 0.5, 2.0)),
+)
+LINE_BOX = Hypothesis("linear", "k * C_A", (Param("k", 0.0, 10.0),))
+CONST_BOX = Hypothesis("const", "c + 0 * C_A", (Param("c", 0.0, 10.0),))
+# The control as it is run, with fewer particles to keep the tests fast
+SMC = replace(FAST, evidence="smc", lam=2.0, n_particles=30)
+
+
+def particles(c: Candidate) -> SMCResult:
+    assert c.smc is not None
+    return c.smc
+
+
+def averages(agent: MDAAgent) -> list[Predictor]:
+    """The prediction of each candidate averaged over its particles, in pool order."""
+    return [
+        particle_predictor(c.f, particles(c).particles, particles(c).weights) for c in agent.pool
+    ]
+
+
+def test_smc_control_scores_the_pool_by_tempered_smc():
+    # At step k every candidate is run in pool order with one generator, seeded by
+    # (seed, k, stream) as the fits of the BIC arm are (D8), and each run starts from the prior
+    library = (MM_BOX, HILL_BOX, LINE_BOX)
+    agent = agent_on_d0(library=library, config=SMC, seed=5, y0=NOISY_Y0)
+    for step, x in enumerate([None, *conditions(2)]):
+        if x is not None:
+            agent.update_state(x, 1.01 * float(mm(x[None, :])[0]))
+        reference = Pool()
+        reference.add(library, Origin.SEED, added_at=3)
+        rng = np.random.default_rng([5, step, FIT_STREAM])
+        reference.refit_smc(agent.X, agent.y, rng=rng, n_particles=SMC.n_particles)
+        assert agent.step == step and names(agent) == [h.name for h in library]
+        for c, expected in zip(agent.pool, reference, strict=True):
+            np.testing.assert_array_equal(particles(c).particles, particles(expected).particles)
+            np.testing.assert_array_equal(fitted(c).theta, fitted(expected).theta)
+            assert c.fit_err == expected.fit_err
+        # The weights are those of the log evidence under p(m) ∝ exp(-2 C_m) (Alg. 9), and
+        # `bic` holds the evidence on the scale of a BIC
+        log_w = log_model_weights(reference.log_z, reference.n_free, 2.0)
+        np.testing.assert_array_equal(agent.log_weights, log_w)
+        np.testing.assert_array_equal(agent.bic, -2.0 * reference.log_z)
+        assert agent.weights.sum() == pytest.approx(1.0)
+    assert agent.get_model().hypothesis is MM_BOX and agent.weights[2] < 1e-6
+
+
+def test_evidence_decides_which_refit_runs(refits, smc_refits):
+    control = agent_on_d0(library=(MM_BOX, LINE_BOX), config=SMC)
+    feed(control, 1)
+    assert [r.n for r in smc_refits] == [3, 4] and refits == []
+    assert all(c.smc is not None for c in control.pool)
+    smc_refits.clear()
+    primary = agent_on_d0(library=(MM_BOX, LINE_BOX))
+    feed(primary, 1)
+    assert [r.n for r in refits] == [3, 4] and smc_refits == []
+    assert all(c.smc is None for c in primary.pool)
+
+
+@pytest.mark.parametrize(("prior", "log_span"), [("uniform", None), ("log_uniform", 10.0)])
+def test_smc_settings_reach_the_pool(smc_refits, prior, log_span):
+    config = replace(
+        SMC,
+        n_particles=20,
+        ess_fraction=0.7,
+        n_moves=2,
+        max_rungs=30,
+        step_scale=0.3,
+        step_floor=0.01,
+        param_prior=prior,
+        log_span=10.0,
+        rel_floor=0.02,
+        rho=0.05,
+        sigma_floor=0.02,
+    )
+    agent = agent_on_d0(library=(MM_BOX,), config=config)
+    feed(agent, 1)
+    assert len(smc_refits) == 2  # the initialisation and the update
+    for r in smc_refits:
+        rng = r.settings.pop("rng")
+        assert isinstance(rng, np.random.Generator)
+        # The two-decade threshold of the fit is passed on only for the log-uniform prior (D18)
+        assert r.settings == {
+            "n_particles": 20,
+            "ess_fraction": 0.7,
+            "n_moves": 2,
+            "max_rungs": 30,
+            "step_scale": 0.3,
+            "step_floor": 0.01,
+            "log_span": log_span,
+            "rel_floor": 0.02,
+            "rho": 0.05,
+            "sigma_floor": 0.02,
+        }
+
+
+def test_structure_prior_of_the_smc_control_comes_from_the_config():
+    # The same seed gives the same particles and so the same evidence; the prior then takes
+    # 2 in the log weight per parameter (spec §8)
+    library = (MM_BOX, HILL_BOX, LINE_BOX)
+    plain = agent_on_d0(library=library, config=replace(SMC, lam=0.0), y0=NOISY_Y0)
+    prior = agent_on_d0(library=library, config=SMC, y0=NOISY_Y0)
+    np.testing.assert_array_equal(prior.bic, plain.bic)
+    expected = plain.log_weights - 2.0 * n_free(plain.pool)
+    np.testing.assert_allclose(
+        prior.log_weights, expected - np.logaddexp.reduce(expected), rtol=1e-9
+    )
+    assert prior.weights[1] < plain.weights[1]  # the Hill law has the most parameters
+
+
+def test_smc_control_predicts_with_the_best_fitting_particle_of_the_map_model():
+    agent = agent_on_d0(library=(LINE_BOX, MM_BOX, HILL_BOX), config=SMC, y0=NOISY_Y0)
+    feed(agent, 2)
+    best = agent.get_model()
+    assert best.hypothesis is MM_BOX and best is agent.pool[int(np.argmax(agent.weights))]
+    run = particles(best)
+    X = conditions(20, seed=5)
+    predicted = agent.get_predictor()(X)
+    np.testing.assert_array_equal(predicted, best.f(run.particles[run.best], X))
+    # A plug-in (Alg. 2), and so not the average over the particles, which the design uses
+    assert not np.allclose(predicted, particle_predictor(best.f, run.particles)(X), rtol=1e-6)
+    # The best particle is close to the law behind the data
+    np.testing.assert_allclose(predicted, mm(X), rtol=0.1)
+
+
+def test_smc_control_designs_with_the_particle_averages():
+    # CMA-ES on the weights and, for each law, its prediction averaged over its particles
+    # (Eq. 60), with the configured settings and the design generator of the step (D8)
+    config = replace(SMC, n_evals=20, sigma0=0.1, design_space="log1p")
+    library = (MM_BOX, HILL_BOX, LINE_BOX)
+    agent = agent_on_d0(library=library, config=config, seed=1, y0=NOISY_Y0)
+
+    def reference(weights: np.ndarray, predict: Sequence[Predictor]) -> np.ndarray:
+        """The design for the agent's current state, by `cma_design` itself."""
+        rng = design_rng(agent)
+        return cma_design(weights, predict, rng=rng, n_evals=20, sigma0=0.1, space="log1p")
+
+    for _ in range(3):
+        x = agent.design()
+        assert agent.last_design == "cma" and in_box(x)
+        np.testing.assert_array_equal(x, reference(agent.weights, averages(agent)))
+        # In each of these states the plug-in predictors of the BIC arm give another design,
+        # and so does pairing the weights with the wrong laws
+        assert not np.array_equal(reference(agent.weights, predictors(agent)), x)
+        assert not np.array_equal(reference(agent.weights[::-1].copy(), averages(agent)), x)
+        np.testing.assert_array_equal(agent.design(), x)  # repeats until the next update
+        agent.update_state(x, 1.01 * float(mm(x[None, :])[0]))
+
+
+def test_smc_control_checks_and_caps_on_the_best_particles_fit_error():
+    # The predictive check and the adaptive cap read the fit of the MAP law (Alg. 13, Alg. 10),
+    # which in the control is its best-fitting particle (D21)
+    X = conditions(3, seed=3)
+    y = mm(X) * np.random.default_rng(0).normal(1.0, 0.02, size=3)
+    config = replace(SMC, n_min=1)
+    fits = agent_on_d0(library=(MM_BOX, LINE_BOX, CONST_BOX), config=config, y0=NOISY_Y0)
+    misfits = agent_on_d0(library=(LINE_BOX, CONST_BOX), config=config, y0=NOISY_Y0)
+    for agent in (fits, misfits):
+        assert agent.cap == config.n_max  # not applied at initialisation
+        for x, y_x in zip(X, y.tolist(), strict=True):
+            best = agent.get_model()
+            rel = relative_residuals(agent.y, fitted(best).y_hat, config.rel_floor)
+            assert best.fit_err == float(np.median(rel))
+            agent.update_state(x, y_x)
+            assert agent.info.e_star == best.fit_err  # the cached check (D5)
+        assert agent.weights.max() > config.tau_c
+    # One law dominates in both pools. Only where it also fits does the cap drop, and the
+    # survivor is then run again on its own
+    assert fits.cap == 1 and names(fits) == ["michaelis_menten"]
+    assert fits.get_model().fit_err <= config.tau_fit
+    assert particles(fits.pool[0]).loglik.shape == (SMC.n_particles,)
+    assert misfits.cap == config.n_max and names(misfits) == ["linear", "const"]
+    assert misfits.get_model().fit_err > config.tau_fit
+
+
+def test_smc_control_expands_and_runs_the_new_candidates():
+    proposer = FakeProposer(expand=[[MM_BOX]])
+    agent = agent_on_d0(library=(LINE_BOX, CONST_BOX), proposer=proposer, config=SMC)
+    feed(agent, 1)
+    # The line misfits, so the proposer is asked, and its law is scored with the others
+    assert e_star(agent) > SMC.tau_e and (agent.n_e, agent.info.n_added) == (1, 1)
+    assert names(agent) == ["linear", "const", "michaelis_menten"]
+    assert all(particles(c).loglik.shape == (SMC.n_particles,) for c in agent.pool)
+    assert agent.get_model().hypothesis is MM_BOX
+    # The proposer saw the pool as the control fits it: point estimates and their errors
+    asked = proposer.expansions[0]
+    assert asked.fitted == [True, True] and all(c.smc is not None for c in asked.pool)
+
+
+def test_smc_control_without_evidence_has_no_map_model():
+    proposer = FakeProposer()
+    agent = agent_on_d0(library=(BROKEN,), proposer=proposer, config=SMC)
+    assert agent.map_index is None
+    np.testing.assert_array_equal(agent.weights, [0.0])
+    np.testing.assert_array_equal(agent.bic, [np.inf])
+    assert agent.get_model() is agent.pool[0]
+    # No law has a weight, so V(a) is 0 everywhere, and the check asks for candidates
+    x = agent.design()
+    assert agent.last_design == "cma" and in_box(x)
+    agent.update_state(x, 1.0)
+    assert agent.info.e_star == math.inf and len(proposer.expansions) == 1
+
+
+def smc_driven(seed: int, n: int = 3) -> MDAAgent:
+    """An agent of the control after `n` rounds of observing `mm` at its own designs."""
+    agent = agent_on_d0(library=(MM_BOX, HILL_BOX, LINE_BOX), config=SMC, seed=seed, y0=NOISY_Y0)
+    for _ in range(n):
+        x = agent.design()
+        agent.update_state(x, 1.01 * float(mm(x[None, :])[0]))
+    return agent
+
+
+def test_smc_control_is_reproducible_and_leaves_the_global_random_state_alone():
+    np.random.seed(0)  # noqa: NPY002
+    before = np.random.get_state()[1].copy()  # noqa: NPY002
+    a = smc_driven(seed=3)
+    np.testing.assert_array_equal(np.random.get_state()[1], before)  # noqa: NPY002
+    np.random.seed(1)  # noqa: NPY002
+    b = smc_driven(seed=3)
+    np.testing.assert_array_equal(a.X, b.X)
+    np.testing.assert_array_equal(a.weights, b.weights)
+    for ca, cb in zip(a.pool, b.pool, strict=True):
+        np.testing.assert_array_equal(particles(ca).particles, particles(cb).particles)
+    # Another cell seed gives other particles, and with them other designs
+    c = smc_driven(seed=4)
+    assert not np.array_equal(a.X[3:], c.X[3:])
+    assert not np.array_equal(particles(a.pool[0]).particles, particles(c.pool[0]).particles)
+
+
+def test_particles_of_a_snapshot_cannot_be_changed():
+    agent = agent_on_d0(library=(MM_BOX, LINE_BOX), config=SMC)
+    x = agent.design()
+    for c in agent.pool:
+        for name in ("particles", "weights", "loglik"):
+            with pytest.raises(ValueError, match="read-only"):
+                getattr(particles(c), name)[...] = 0.0
+    np.testing.assert_array_equal(agent.design(), x)

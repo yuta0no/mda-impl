@@ -133,6 +133,17 @@ def expanding() -> RunLog:
     return run_cell(FRACTAL, 0, replace(TINY, n_active=3), OneLawPerCall())
 
 
+# The SMC control (spec §8) on a short cell, with fewer particles than it is run with. Its prior
+# is the default, log-uniform for the six-decade bounds of the seed laws (D18)
+SMC = replace(TINY, evidence="smc", lam=2.0, n_particles=30, n_active=3)
+
+
+@cache
+def smc_control() -> RunLog:
+    """A short run of the control in which the cap drops twice."""
+    return run_cell(C0, 1, SMC)
+
+
 # Protocol pieces (spec §1, D11)
 
 
@@ -253,6 +264,7 @@ def test_logged_scores_are_those_of_the_logged_map_model(smoke: RunLog):
     few_queries = replace(TINY, n_query=7)
     logs = [smoke, tiny(C0, 1), tiny(C0, 2), tiny(ZERO_D0, 0), tiny(C0, 1, few_queries)]
     assert {log.seed for log in logs} == {0, 1, 2} and logs[-1].config["n_query"] == 7
+    logs.append(smc_control())  # theta hat is then the best-fitting particle (D21)
     for log in logs:
         world = World(WorldSpec(log.world))
         X_test = world.heldout(TEST_SEED, N_TEST)
@@ -317,8 +329,9 @@ def test_passive_data_follow_the_config():
     [
         (lambda: tiny(C0, 2), NullProposer, 0, [24, 6, 6]),
         (expanding, OneLawPerCall, 3, [24, 24, 24, 24]),
+        (smc_control, NullProposer, 0, [24, 6, 24, 6]),
     ],
-    ids=["cap drop", "expansions"],
+    ids=["cap drop", "expansions", "smc control"],
 )
 def test_log_is_what_a_fresh_agent_does_with_the_logged_observations(
     make_log, make_proposer, n_e, caps
@@ -373,6 +386,28 @@ def test_random_design_arm_is_recorded():
     log = run_cell(C0, 0, replace(TINY, design="random"))
     assert [s.design for s in log.steps] == [None, "random", "random"]
     assert log.config["design"] == "random"
+
+
+def test_smc_control_is_recorded():
+    log = smc_control()
+    config = MDAConfig.from_dict(log.config)
+    assert config == SMC and (config.evidence, config.lam) == ("smc", 2.0)
+    assert config.param_prior == "log_uniform"
+    assert RunLog.from_json(log.to_json()) == log
+    assert [s.budget for s in log.steps] == [3, 4, 5, 6]
+    for s in log.steps:
+        # `bic` holds -2 log Z, and the weights are those of the evidence under the structure
+        # prior p(m) ∝ exp(-2 C_m) (Alg. 9). Every parameter of a seed law is free
+        score = np.array([-0.5 * m.bic - 2.0 * len(m.params) for m in s.pool])
+        expected = np.exp(score - np.logaddexp.reduce(score))
+        np.testing.assert_allclose([m.weight for m in s.pool], expected, rtol=1e-9)
+        assert s.map == int(np.argmax(expected))
+        for m in s.pool:
+            assert len(m.theta) == len(m.params)
+            assert m.rss >= 0 and m.fit_err >= 0
+    # The world's own law is found, and a best-fitting particle predicts well enough to pass
+    assert best(log.steps[-1]).name == "michaelis_menten"
+    assert all(s.eval.passed for s in log.steps)
 
 
 def test_proposals_and_their_llm_calls_are_logged():

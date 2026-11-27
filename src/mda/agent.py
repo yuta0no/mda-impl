@@ -10,6 +10,11 @@ One (world, seed) cell drives an agent as Alg. 1 does (`mda.run.run_cell`):
 
 The agent holds the data, the candidate pool and the model weights. Every hyperparameter comes
 from its `MDAConfig`, and every hypothesis beyond the seed library from its `Proposer`.
+
+With `config.evidence == "smc"` the agent is the SMC control (spec §8). A model-posterior step
+then runs tempered SMC for every candidate in place of the fit: the weights come from the log
+evidence, the design averages each candidate's prediction over its particles, and the point
+estimate, wherever the agent needs one, is the best-fitting particle (D21).
 """
 
 import math
@@ -35,13 +40,15 @@ from mda.posterior import (
     prune_top,
 )
 from mda.propose import CallRecord, NullProposer, Proposer
+from mda.smc import log_model_weights, particle_predictor
 
 # How a design was chosen: by CMA-ES, at random because the arm asks for it, or at random
 # because CMA-ES found no condition where V(a) is defined (spec §6)
 type DesignMethod = Literal["cma", "random", "fallback"]
 
 # Streams of the per-step random generators, seeded by (cell seed, step, stream) (D8). They are
-# non-zero because a seed sequence ignores trailing zeros
+# non-zero because a seed sequence ignores trailing zeros. The fit stream also drives the SMC
+# runs of the SMC control, which take the place of the fits
 _FIT, _DESIGN = 1, 2
 
 
@@ -64,7 +71,8 @@ class MDAAgent:
 
     - `X`, `y`: the data, the passive observations first (arrays marked read-only);
     - `pool`: the candidates, fitted to all of the data (a tuple, in pool order);
-    - `weights`, `log_weights`, `bic`: one value per candidate, in pool order (copies);
+    - `weights`, `log_weights`, `bic`: one value per candidate, in pool order (copies). In the
+      SMC control, `bic` holds -2 log Z;
     - `map_index`: the pool index of the MAP candidate;
     - `cap`: the pool-size cap chosen by the last update (Alg. 10);
     - `n_e`: the number of expansion rounds so far;
@@ -126,9 +134,10 @@ class MDAAgent:
         """The next condition to observe, in natural units (Alg. 2 `design`, spec §6).
 
         With `config.design == "cma"`, the CMA-ES maximiser of the between-model variance V(a) of
-        the fitted candidates' predictions. If V(a) is undefined everywhere CMA-ES looks, the
-        condition is drawn at random instead and `last_design` is "fallback". With "random", it
-        is always drawn at random.
+        the fitted candidates' predictions; in the SMC control, of their predictions averaged
+        over the particles. If V(a) is undefined everywhere CMA-ES looks, the condition is drawn
+        at random instead and `last_design` is "fallback". With "random", it is always drawn at
+        random.
 
         Calling it again before the next `update_state` returns the same condition.
         """
@@ -142,7 +151,7 @@ class MDAAgent:
         try:
             x = cma_design(
                 self.weights,
-                [_predictor(c) for c in self._pool],
+                self._design_predictors(),
                 rng=rng,
                 n_evals=cfg.n_evals,
                 sigma0=cfg.sigma0,
@@ -209,7 +218,10 @@ class MDAAgent:
         return self._pool[0 if m is None else m]
 
     def get_predictor(self) -> Predictor:
-        """The plug-in predictor of the MAP candidate, f(x; theta hat). No model averaging."""
+        """The plug-in predictor of the MAP candidate, f(x; theta hat). No model averaging.
+
+        Theta hat is the least-squares estimate, or the best-fitting particle in the SMC control.
+        """
         return _predictor(self.get_model())
 
     # Public state: properties without setters
@@ -278,7 +290,10 @@ class MDAAgent:
 
     @property
     def bic(self) -> PerModel:
-        """The BIC of each candidate, of the kind `config.bic` names; inf without a finite fit."""
+        """The BIC of each candidate, of the kind `config.bic` names; inf without a finite fit.
+
+        In the SMC control it is -2 log Z, the quantity a BIC approximates.
+        """
         return self._bic.copy()
 
     @property
@@ -292,29 +307,65 @@ class MDAAgent:
         return np.random.default_rng([self._seed, self._step, stream])
 
     def _score(self, rng: np.random.Generator, cap: int) -> None:
-        """One model-posterior step (Alg. 9): refit, reweight, and prune to `cap`."""
+        """One model-posterior step (Alg. 9): refit, reweight, and prune to `cap`.
+
+        In the SMC control the refit is a tempered-SMC run per candidate, and the weights come
+        from the log evidence in place of the BIC.
+        """
         cfg = self._config
-        self._pool.refit(
-            self._X,
-            self._y,
-            rng=rng,
-            n_starts=cfg.n_starts,
-            residual=cfg.residual,
-            rel_floor=cfg.rel_floor,
-            rho=cfg.rho,
-            sigma_floor=cfg.sigma_floor,
-            log_span=cfg.log_span,
-        )
-        n, n_free, rss = len(self._y), self._pool.n_free, self._pool.rss
-        if cfg.bic == "profiled":
-            bic = bic_profiled(rss, n_free, n, cfg.rss_floor)
-        elif cfg.bic == "fixed":
-            bic = bic_fixed(rss, n_free, n)
+        n, n_free = len(self._y), self._pool.n_free
+        if cfg.evidence == "smc":
+            self._pool.refit_smc(
+                self._X,
+                self._y,
+                rng=rng,
+                n_particles=cfg.n_particles,
+                ess_fraction=cfg.ess_fraction,
+                n_moves=cfg.n_moves,
+                max_rungs=cfg.max_rungs,
+                step_scale=cfg.step_scale,
+                step_floor=cfg.step_floor,
+                log_span=cfg.log_span if cfg.param_prior == "log_uniform" else None,
+                rel_floor=cfg.rel_floor,
+                rho=cfg.rho,
+                sigma_floor=cfg.sigma_floor,
+            )
+            log_z = self._pool.log_z
+            bic, log_w = -2.0 * log_z, log_model_weights(log_z, n_free, cfg.lam)
+        elif cfg.evidence == "bic":
+            self._pool.refit(
+                self._X,
+                self._y,
+                rng=rng,
+                n_starts=cfg.n_starts,
+                residual=cfg.residual,
+                rel_floor=cfg.rel_floor,
+                rho=cfg.rho,
+                sigma_floor=cfg.sigma_floor,
+                log_span=cfg.log_span,
+            )
+            rss = self._pool.rss
+            if cfg.bic == "profiled":
+                bic = bic_profiled(rss, n_free, n, cfg.rss_floor)
+            elif cfg.bic == "fixed":
+                bic = bic_fixed(rss, n_free, n)
+            else:
+                raise ValueError(f"unknown bic {cfg.bic!r}")
+            log_w = log_weights(bic, log_prior(n_free, cfg.lam))
         else:
-            raise ValueError(f"unknown bic {cfg.bic!r}")
-        keep, self._log_w = prune_top(log_weights(bic, log_prior(n_free, cfg.lam)), cap)
+            raise ValueError(f"unknown evidence {cfg.evidence!r}")
+        keep, self._log_w = prune_top(log_w, cap)
         self._pool.keep(keep)
         self._bic = bic[keep]
+
+    def _design_predictors(self) -> list[Predictor]:
+        """The prediction mu-bar_m of each candidate that V(a) compares (spec §6).
+
+        The plug-in prediction, or in the SMC control the average over the candidate's particles.
+        """
+        if self._config.evidence == "smc":
+            return [_particle_predictor(c) for c in self._pool]
+        return [_predictor(c) for c in self._pool]
 
     def _map(self) -> int | None:
         if not np.isfinite(self._log_w).any():
@@ -385,3 +436,10 @@ def _predictor(c: Candidate) -> Predictor:
     """f(x; theta hat) of a fitted candidate."""
     theta = _fit_of(c).theta
     return lambda X: c.f(theta, X)
+
+
+def _particle_predictor(c: Candidate) -> Predictor:
+    """The average of f(x; theta) over the particles of a candidate of the SMC control."""
+    if c.smc is None:
+        raise RuntimeError(f"candidate {c.hypothesis.name!r} has no particles")
+    return particle_predictor(c.f, c.smc.particles, c.smc.weights)

@@ -34,9 +34,9 @@ class ModelRecord:
     name: str
     expr: str
     params: list[str]  # parameter names, in the order of `theta`
-    theta: list[float]  # theta hat
+    theta: list[float]  # theta hat; in the SMC control, the best-fitting particle (D21)
     rss: float  # inf when the fit is not finite
-    bic: float  # of the kind `config.bic` names
+    bic: float  # of the kind `config.bic` names; in the SMC control, -2 log Z
     weight: float  # p(m | D)
     fit_err: float  # median relative residual on the data
     origin: str  # "seed", "init" or "expand"
