@@ -17,7 +17,7 @@ This blueprint lists what remains to reproduce the Model Discovery Agent (MDA) e
 
 ## Current state
 
-This is `main` with `feat/fit`, `feat/library`, `feat/posterior`, `feat/design`, `feat/llm-client` and `feat/agent` merged.
+This is `main` with `feat/fit`, `feat/library`, `feat/posterior`, `feat/design`, `feat/llm-client` and `feat/agent` merged, plus the library part of `feat/smc`.
 
 | Module | Contents | Merged in |
 | --- | --- | --- |
@@ -30,6 +30,7 @@ This is `main` with `feat/fit`, `feat/library`, `feat/posterior`, `feat/design`,
 | `mda.pool` | `Candidate`, `Origin` and `Pool`: `add` with exact-expression dedupe, `refit`, `keep`, and the per-model arrays `rss`, `n_free` and `fit_err` | `feat/posterior` |
 | `mda.posterior` | `bic_profiled`, `bic_fixed`, `log_prior`, `log_weights`, `weights`, `prune_top`, `adaptive_cap` | `feat/posterior` |
 | `mda.design` | `between_model_variance`, `cma_design`, `random_design` | `feat/design` |
+| `mda.smc` | `tempered_smc` and `SMCResult`, `log_likelihood`, `particle_predictor`, `log_model_weights`. Not yet used by an arm | `feat/smc` |
 | `mda.llm` | `LLMClient` (the provider-neutral base), `ClaudeLLM`, `FakeLLM`, `Reply`, `StopReason`, `Usage`, `Pricing`, `ReplyCache`; `HYPOTHESES_SCHEMA` in `mda.hypothesis` | `feat/llm-client` |
 | `tools/llm_check.py` | Counts proposer-prompt tokens, or makes one real call | `feat/llm-client` |
 | `mda.config` | `MDAConfig`, every hyperparameter with its source, and `DEFAULTS`, from which the other modules read their keyword defaults | `feat/agent` |
@@ -53,7 +54,7 @@ src/mda/
   llm.py        feat/llm-client   LLM clients, reply cache, transcripts, usage and cost (done)
   run.py        feat/agent        run_cell: Alg. 1 for one (world, seed), with a JSON run log (done)
                 feat/runner       grid over worlds × seeds × arms, CLI, resume, manifest
-  smc.py        feat/smc          tempered-SMC evidence (control arm)
+  smc.py        feat/smc          tempered-SMC evidence (control arm); the library is done, the arm is not
   icl.py        feat/icl          ICL (+MDA design) and ICL (+LLM design)
   analysis.py   feat/analysis     aggregation, world bootstrap, figures and tables
 configs/        frozen arm configs (feat/runner, exp/chembench)
@@ -91,7 +92,7 @@ flowchart TD
     runner --> analysis["feat/analysis"]
     runner --> icl["feat/icl"]
     llmc --> icl
-    posterior --> smc["feat/smc"]
+    posterior --> smc["feat/smc (library done)"]
     design --> smc
     proposer --> exp["exp/chembench"]
     analysis --> exp
@@ -103,7 +104,7 @@ There are three tracks, which can proceed in parallel:
 
 - **Numerics:** `feat/fit`, `feat/library`, `feat/posterior`, `feat/design` and `feat/agent` (done) → `feat/runner`.
 - **LLM:** `feat/llm-client` (done). `feat/proposer` can start now.
-- **Evaluation:** `feat/analysis`, `feat/icl` and `feat/smc` build on the run-log schema from `feat/agent`, which is fixed: `mda.run.RunLog`, schema 1.
+- **Evaluation:** `feat/analysis` and `feat/icl` build on the run-log schema from `feat/agent`, which is fixed: `mda.run.RunLog`, schema 1. The library part of `feat/smc` is done; its arm waits for `feat/runner`.
 
 | # | Branch | Scope | Depends on | Milestone |
 | --- | --- | --- | --- | --- |
@@ -117,7 +118,7 @@ There are three tracks, which can proceed in parallel:
 | 8 | `feat/proposer` | LLM proposer and the hybrid arm | 5, 7 | M2 |
 | 9 | `feat/analysis` | Aggregation, bootstrap, figures | 6 | M3 |
 | 10 | `feat/icl` | ICL baselines | 6, 7 | M3 |
-| 11 | `feat/smc` | Tempered-SMC control | 3, 4 | M3 |
+| 11 | `feat/smc` (library done) | Tempered-SMC control | 3, 4; the arm also 5, 6 | M3 |
 | 12 | `exp/chembench` | Frozen configs, full runs, results write-up | 8, 9, 10, 11 | M4 |
 
 ### 1. `feat/fit` (done)
@@ -334,17 +335,62 @@ There are three tracks, which can proceed in parallel:
   - Prompt rendering.
   - Parsing predictions and design replies, with the retry and fallback paths, using `FakeLLM`.
 
-### 11. `feat/smc`
+### 11. `feat/smc` (library done)
 
-- **Scope.** `mda/smc.py`:
-  - Adaptive-tempering SMC per Alg. 6, with 100 particles per structure, random-walk Metropolis that rejects out-of-bounds proposals, and the D18 settings.
-  - $p(m) \propto e^{-2C_m}$.
-  - $\bar\mu_m(a)$ averaged over particles in $V(a)$.
-  - A `--arm smc` config.
-- **Tests.**
-  - On a one-parameter toy model, $\log Z$ matches numerical quadrature.
-  - The ESS stays at or above $\eta N$ after each rung.
-  - Particles never leave the bounds.
+- **Scope.** As built, in `mda/smc.py`. Like `mda.posterior` and `mda.design`, it takes one hypothesis or per-model arrays, and does not depend on `mda.pool`:
+  - `tempered_smc(h, X, y, *, rng, n_particles, ess_fraction, n_moves, max_rungs, step_scale, step_floor, log_span, sigma_n, f) -> SMCResult`: adaptive-tempering SMC for one hypothesis (Alg. 6, D18).
+    - The prior is uniform over the declared bounds, in natural units (App. A.4). The particles start as draws from it.
+    - Each rung takes the largest temperature step that leaves an effective sample size of $\eta N_p$, found by bisection, or the whole remaining step when that leaves at least as much. Rung $J_p$ takes the whole remaining step whatever it leaves.
+    - It then adds $\log \sum_i W_i\, e^{\Delta\beta\, \ell_i}$ to $\log Z$, resamples, and makes $R_p$ random-walk Metropolis moves of every particle at the new temperature.
+    - The proposal scale is half the per-coordinate standard deviation of the resampled particles, floored at $10^{-3}$ before scaling, and fixed for the rung.
+    - A proposal outside the bounds is rejected without being evaluated, never clipped (spec §11).
+    - A parameter with `low == high` is held fixed and never proposed (D20).
+    - A parameter vector with a non-finite prediction has likelihood 0. Such particles are dropped at the first rung, and a move to one is never accepted. A model that is non-finite over its whole box gets `log_z = -inf` and `ok = False`.
+  - `SMCResult`: `particles` (in natural units), `weights` (uniform, because every rung resamples), `loglik`, `log_z`, the per-rung `betas`, `ess` and `acceptance`, the number of likelihood evaluations `n_loglik`, and `ok`.
+  - `log_likelihood(y, y_hat, sigma_n)`: the Gaussian log-likelihood of the whitened raw residual (D1) with its constants, so $\log Z$ is a log evidence. Up to those constants it is $-\mathrm{RSS}/2$ with the RSS of `mda.fit`, the likelihood behind the fixed-scale BIC.
+  - `particle_predictor(f, particles, weights) -> Predictor`: $\bar\mu_m(a) = \sum_i W_i f_m(a; \theta_i)$ (Eq. 60), for `between_model_variance` and `cma_design`.
+  - `log_model_weights(log_z, n_params, lam)`: $\log \mathrm{softmax}_m(\log Z_m + \log p(m))$ with $p(m) \propto e^{-2C_m}$ (Alg. 9, spec §8). It calls `posterior.log_weights` and `posterior.log_prior`, and its result goes to `posterior.prune_top` as it is.
+- **Choices the paper leaves open.** The first three are now part of D18:
+  - Resampling is systematic.
+  - The likelihood uses the whitening scale of the BIC arm, $\sigma_n = \max(\rho \lvert y_n\rvert, \sigma_{\mathrm{floor}})$. The paper gives no noise scale for the SMC arm. The `log1p` residual of D1 has no likelihood here: it would need a noise scale in log space, which the spec does not define.
+  - When more than $1 - \eta$ of the prior draws have likelihood 0, no step reaches the target. The first rung then takes the smallest step a float allows, which only removes those particles.
+  - `tempered_smc` runs from the prior on all the data each time. There is no warm start from the previous update's particles.
+- **Constants.** `N_PARTICLES`, `ESS_FRACTION`, `N_MOVES`, `MAX_RUNGS`, `STEP_SCALE` and `STEP_FLOOR` are still module constants of `mda/smc.py`; `MDAConfig` has no fields for them yet (see Remaining). `LAMBDA` (2) is the SMC arm's value of the existing `MDAConfig` field `lam`, whose default of 0 is the BIC arm's. The functions take all seven as arguments. `sigma_n` and `log_span` have no constants: the caller passes `sigma(y, rho, sigma_floor)`, and `log_span` is off unless the caller passes the D8 threshold.
+- **Tests.** `tests/test_smc.py` covers the three cases planned for this branch, then the edge cases:
+  - On a one-parameter model, $\log Z$ matches `scipy.integrate.quad`: with 400 particles, and with the default 100 over 8 seeds, where the mean of $\hat Z / Z$ is checked too. On a two-parameter model it matches a grid quadrature.
+  - The effective sample size of every rung is at or above $\eta N_p$, for $\eta$ of 0.3, 0.5 and 0.9. The exceptions are the forced last rung at the cap, and a first rung that only removes particles of likelihood 0.
+  - Every parameter vector the likelihood sees is inside the bounds. With a bound cutting the likelihood at its peak, no particle sits on the bound, and the mean and the evidence are those of the truncated posterior. A version that clips fails this test.
+  - With one rung and no moves, $\log Z$ is the importance-sampling estimate from the prior draws, to 12 digits.
+  - A fixed parameter is not sampled, and the run is then the free parameter's, draw for draw. A hypothesis with no free parameter costs one likelihood evaluation.
+  - A model that is non-finite on a quarter of its box has three quarters of the evidence, one that is non-finite on nine tenths goes through the first-rung case above, and one that is non-finite everywhere has weight 0. None of them warns.
+  - The result depends only on the `rng` passed in, and the global NumPy state is not used.
+  - `particle_predictor` against hand computation, inside $V(a)$ and `cma_design`, with zero-weight and non-finite particles.
+  - `log_model_weights` against hand computation, and against `posterior.log_weights` of $-2 \log Z$.
+- **Measured.**
+  - **Accuracy where the box is moderate.** On the one-parameter test model, 30 seeds of the default settings had a mean error of $-0.03$ in $\log Z$ and a standard deviation of 0.24.
+  - **Accuracy against the size of the box.** Michaelis–Menten on 15 observations of `c0_michaelis_menten`, 20 seeds, error of $\log Z$ against quadrature. The posterior stays the same and the prior box grows:
+
+    | Bounds of `kcat` and `Km` | Box volume / posterior volume | Median error | Range |
+    | --- | --- | --- | --- |
+    | $[1, 10]$ and $[0.01, 1]$ | $10^4$ | $-0.2$ | $-0.9$ to $+0.4$ |
+    | $[0.1, 30]$ and $[0.01, 10]$ | $4 \times 10^5$ | $-0.2$ | $-2.1$ to $+1.2$ |
+    | $[0.01, 100]$, both | $10^7$ | $-4.3$ | $-9.6$ to $-0.1$ |
+    | $[10^{-3}, 10^{3}]$, both (D7) | $10^9$ | $-59$ | $-1582$ to $-14$ |
+
+  - **The seed bounds are out of reach.** With the D7 bounds, the posterior of Michaelis–Menten sits in a corner holding about $10^{-9}$ of the box. The particles reach it too late or not at all, so the evidence of the true law comes out tens to thousands too low. The other seed laws behave the same way. With each on its own world at $B = 15$, $\log Z$ differed between 6 seeds by 400 to 3,800 for eight of the nine. For ping-pong the six agreed to within 2.3, and all of them stopped about 105 short of the least-squares fit's log-likelihood.
+  - **More computation does not fix it.** On the Michaelis–Menten case above, the median error with the D7 bounds was $-21$ with $R_p = 20$, $-22$ with $\eta = 0.9$, $-10$ with both, and $-21$ with 1,000 particles.
+  - **A log-uniform prior does.** `log_span=100` gives a parameter whose bounds span more than two decades a prior uniform in its logarithm, and moves it in its logarithm: the rule D8 uses for the fit. On the same case the error was then $-1.4$ to $+0.5$ (median $0.0$) with the default settings. On the nine seed laws every run reached the least-squares fit's log-likelihood to within 0.2, and $\log Z$ differed between 6 seeds by 0.8 (Michaelis–Menten) to 11 (Arrhenius). This changes the prior, so the evidence is no longer the paper's. It is off by default, and using it is a decision for D18.
+  - **Cost.** One model on one update, averaged over the 9 seed laws on the 9 canonical worlds: 45 ms at $B = 3$, 95 ms at $B = 15$ and 110 ms at $B = 25$, with a maximum of 0.3 s. That is 2,700 to 6,300 likelihood evaluations at about 17 µs each. A pool of 24 then takes about 2.6 s per update at $B = 25$, against about a second for the BIC refit ([Cost and compute](#cost-and-compute)). `particle_predictor` takes 1.4 ms for a CMA-ES generation of 9 conditions, so a design over 24 models takes about 0.2 s.
+- **Remaining.**
+  - **The prior for wide bounds.** As measured above, the control cannot run on the seed library under the paper's prior. Decide between `log_span`, narrower seed bounds for this arm, or accepting the failure, and record it in D18. This can be decided now.
+  - **Wiring into `MDAAgent`.** The agent scores its pool in one method, `MDAAgent._score`: `Pool.refit`, the BIC, `log_weights` and `prune_top`. The SMC arm runs `tempered_smc` on every candidate there and takes `log_model_weights` in place of the BIC weights; `prune_top` stays. `design()` then takes `particle_predictor` in place of the plug-in predictors. Four things are open:
+    - The paper does not say how the SMC arm predicts. The candidates are the best-fitting particle, as a plug-in, and the particle average.
+    - The adaptive cap and the predictive check need a fit error, which the BIC arm takes from the point estimate.
+    - The random stream. D8 seeds a step's fits from (cell seed, step, 1) and its design from (cell seed, step, 2). The SMC can take a third stream, with the candidates drawing from it in pool order, as the fits do.
+    - The run log. Schema 1 records $\hat\theta$, the RSS, the BIC and `fit_err` of each model, all of which come from a point fit. What the SMC arm writes there, and whether $\log Z$ needs a field and a new schema number, follows from the two choices above.
+  - **`MDAConfig`.** It needs fields for the six constants, and an option that selects the SMC evidence, as `bic` selects the noise scale of the BIC. `lam` is already a field. Nothing blocks this now.
+  - **The `--arm smc` config** (needs `feat/runner`): the SMC option, `lam = 2`, and the prior that D18 settles on.
+  - **Batched likelihood.** A compiled hypothesis takes one parameter vector per call, so a run makes thousands of Python calls. Evaluating all particles in one call needs a change to `mda.hypothesis`.
 
 ### 12. `exp/chembench`
 
