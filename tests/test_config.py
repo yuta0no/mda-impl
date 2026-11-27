@@ -12,6 +12,7 @@ from mda.fit import fit, relative_residuals, residuals, sigma
 from mda.llm import ClaudeLLM
 from mda.pool import Pool
 from mda.posterior import adaptive_cap, bic_profiled, log_prior
+from mda.propose import render_prompt
 
 
 def test_defaults_follow_spec():
@@ -82,6 +83,8 @@ def test_every_field_is_checked_by_the_spec_test():
         (ClaudeLLM.__init__, "effort", "llm_effort"),
         (ClaudeLLM.__init__, "max_tokens", "llm_max_tokens"),
         (ClaudeLLM.__init__, "max_retries", "llm_max_retries"),
+        (render_prompt, "tau_fit", "tau_fit"),
+        (render_prompt, "phase", "prompt_phase"),
     ],
     ids=lambda v: getattr(v, "__qualname__", v),
 )
