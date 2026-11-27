@@ -26,6 +26,23 @@ cp .env.sample .env          # then set ANTHROPIC_API_KEY in .env
 - Add dependencies with `uv add <package>`, or `uv add --dev <package>` for dev tools, so that `uv.lock` stays in sync. CI installs with `uv sync --locked`, which fails if the lock file is out of date.
 - `src/mda/_vendor` is excluded from ruff and ty and kept identical to upstream (see [Upstream code defects](#upstream-code-defects)), so don't edit it.
 
+## Running the experiment
+
+`mda-impl run` runs one arm over a grid of worlds × seeds. Run it from the repository root: arms are read from `configs/<arm>.json`, logs are written to `runs/<arm>/`, and LLM replies are cached in `cache/`.
+
+```sh
+uv run mda-impl run --arm fixed --jobs 24                                # all 57 worlds × seeds 0,1,2
+uv run mda-impl run --arm fixed --worlds canonical --seeds 0             # the 9 canonical worlds
+uv run mda-impl run --arm fixed --worlds c0,c93 --out runs/try --jobs 2  # chosen worlds, another out dir
+```
+
+- **Worlds.** `--worlds` takes `all` (the default), `canonical` (9), `compound` (48), or a comma-separated list of world IDs. An ID can be shortened to its number, such as `c0` for `c0_michaelis_menten`.
+- **Parallelism.** `--jobs N` runs whole cells on `N` worker processes; the default of 1 runs them in-process. In the M1 run, with 24 jobs on a shared 48-core machine, the 171 fixed-library cells took 8 to 25 s each and 2 minutes in all.
+- **Output.** Each cell's log is `runs/<arm>/<world>/s<seed>.json` (`mda.run.RunLog`). `runs/<arm>/manifest.json` records the arm and its hash, and for each invocation the git commit, package versions, command line, worlds and seeds.
+- **Resuming.** Rerunning a command skips the cells whose log exists, so an interrupted grid resumes where it stopped. A cell that raises, such as on a network error, is reported, leaves no log and makes the command exit with status 1; rerun it to retry the failed cells.
+- **Changing an arm.** An out dir holds one arm. If the arm file has changed since the logs were written, the command refuses to run (status 2). Choose another `--out`, or move the old results away.
+- **Arm files.** An arm file holds a proposer kind and the `MDAConfig` fields that differ from the defaults, such as `{"proposer": "null", "config": {"design": "random"}}`. `--arm` also takes the path of an arm file, such as `--arm path/to/arm.json`.
+
 
 ## API cost
 

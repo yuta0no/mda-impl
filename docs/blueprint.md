@@ -36,6 +36,9 @@ This is `main` with `feat/fit`, `feat/library`, `feat/posterior`, `feat/design`,
 | `mda.propose` | The `Proposer` protocol, `Proposal`, `CallRecord` and `NullProposer` | `feat/agent` |
 | `mda.agent` | `MDAAgent` (Alg. 2): `design`, `update_state`, `get_model`, `get_predictor` | `feat/agent` |
 | `mda.run` | `run_cell` (Alg. 1), `RunLog` and its JSON format, `passive_design`, `query_set` | `feat/agent` |
+| `mda.grid` | `Arm`, the proposer registry `PROPOSERS` and `CellContext`, `run_grid` (parallel, resumable, with a manifest), `select_worlds` | `feat/runner` |
+| `mda.cli` | The `mda-impl` command: `mda-impl run` | `feat/runner` |
+| `configs/` | Arm files; `fixed.json`, the fixed-library arm | `feat/runner` |
 | `prompts/chem_propose.txt` | The proposer prompt, verbatim from App. G.1 | — |
 | CI | pre-commit, ty, and pytest on Python 3.12 and 3.13 | `dev/ci` (#2), `dev/ty` (#3) |
 | Tooling | ty as a pre-commit hook, and the Development section of the README | `dev/ty-precommit` (#5) |
@@ -52,11 +55,13 @@ src/mda/
                 feat/proposer     LLMProposer: prompt rendering, parse, dedupe, retry
   llm.py        feat/llm-client   LLM clients, reply cache, transcripts, usage and cost (done)
   run.py        feat/agent        run_cell: Alg. 1 for one (world, seed), with a JSON run log (done)
-                feat/runner       grid over worlds × seeds × arms, CLI, resume, manifest
+  grid.py       feat/runner       run_grid: one arm over worlds × seeds, in parallel, resumable, with a manifest (done)
+  cli.py        feat/runner       the mda-impl command: run (done)
+                feat/analysis     mda-impl report
   smc.py        feat/smc          tempered-SMC evidence (control arm)
   icl.py        feat/icl          ICL (+MDA design) and ICL (+LLM design)
   analysis.py   feat/analysis     aggregation, world bootstrap, figures and tables
-configs/        frozen arm configs (feat/runner, exp/chembench)
+configs/        arm files: fixed.json (feat/runner, done); the other arms' (feat/proposer, feat/smc, exp/chembench)
 runs/, cache/   generated run logs and LLM replies; git-ignored
 ```
 
@@ -85,7 +90,7 @@ flowchart TD
     library --> agent["feat/agent (done)"]
     posterior --> agent
     design --> agent
-    agent --> runner["feat/runner"]
+    agent --> runner["feat/runner (done)"]
     agent --> proposer["feat/proposer"]
     llmc --> proposer
     runner --> analysis["feat/analysis"]
@@ -101,7 +106,7 @@ flowchart TD
 
 There are three tracks, which can proceed in parallel:
 
-- **Numerics:** `feat/fit`, `feat/library`, `feat/posterior`, `feat/design` and `feat/agent` (done) → `feat/runner`.
+- **Numerics:** `feat/fit`, `feat/library`, `feat/posterior`, `feat/design`, `feat/agent` and `feat/runner` (done).
 - **LLM:** `feat/llm-client` (done). `feat/proposer` can start now.
 - **Evaluation:** `feat/analysis`, `feat/icl` and `feat/smc` build on the run-log schema from `feat/agent`, which is fixed: `mda.run.RunLog`, schema 1.
 
@@ -112,7 +117,7 @@ There are three tracks, which can proceed in parallel:
 | 3 | `feat/posterior` (done) | Pool, BIC, weights, pruning, adaptive cap | `feat/fit` | M1 |
 | 4 | `feat/design` (done) | $V(a)$, CMA-ES, random design | main | M1 |
 | 5 | `feat/agent` (done) | MDA agent loop, predictive check, one-cell runner | 2, 3, 4 | M1 |
-| 6 | `feat/runner` | Grid runner, CLI, arm configs | 5 | M1 |
+| 6 | `feat/runner` (done) | Grid runner, CLI, arm configs | 5 | M1 |
 | 7 | `feat/llm-client` (done) | LLM clients, reply cache, cost accounting | main | M2 |
 | 8 | `feat/proposer` | LLM proposer and the hybrid arm | 5, 7 | M2 |
 | 9 | `feat/analysis` | Aggregation, bootstrap, figures | 6 | M3 |
@@ -258,17 +263,66 @@ There are three tracks, which can proceed in parallel:
   - On `c0_michaelis_menten` the MAP model at $B = 25$ is the Arrhenius seed, not Michaelis–Menten, in all three seeds. Its temperature factor absorbs part of the oracle's background factor, which the observations contain and the scores do not (README, "Benchmark behaviour"). The cell still passes, at an RMSLE near 0.02.
 - **Done when** one cell runs end to end with no API calls. Done.
 
-### 6. `feat/runner`
+### 6. `feat/runner` (done)
 
-- **Scope.**
-  - The CLI: `mda-impl run --arm {hybrid,fixed,random,fixed-tau,...} --worlds ... --seeds 0,1,2 --out runs/<arm>`.
-  - Multiprocessing across cells, resuming by skipping completed cells, and a manifest recording the git SHA, config hash, package versions and model ID.
-  - Arm configs in `configs/`, with `runs/` and `cache/` added to `.gitignore`. An arm config is the fields of `MDAConfig` that differ from the defaults, loaded with `MDAConfig.from_dict`; a cell is `run_cell(world, seed, config, proposer)`, and its log is written with `RunLog.to_json`.
-- **Tests.**
-  - The CLI runs a 2-cell grid.
-  - Resume skips completed cells.
-  - Each arm config loads.
-- **Done when** milestone M1 is reached (below).
+- **Scope.** As built:
+  - `mda/grid.py`:
+    - `Arm(name, proposer, config, description="")`, read by `Arm.load(path)` from an arm file, `{"description": ..., "proposer": "<kind>", "config": {...}}`. `config` holds the `MDAConfig` fields that differ from the defaults and is read with `MDAConfig.from_dict`. The name is the file's stem. It labels the out dir and starts the arm's LLM call IDs, so it must be a single call-ID segment. An unknown key, proposer kind or config field raises `ValueError` naming the file. `Arm.digest` is the SHA-256 of the proposer kind and the full config as canonical JSON; the name and description are not in it.
+    - `PROPOSERS`, the proposer registry, maps a proposer kind to a factory `(CellContext) -> Proposer`; `"null"` gives `NullProposer`. `CellContext` holds the arm name, world, seed, config, out dir and cache dir, and derives `call_prefix` (`<arm>/<world>/s<seed>`, D17), `log_path` and `transcript` (`<out>/<world>/s<seed>.transcript.jsonl`).
+    - `run_grid(arm, worlds, seeds, *, out_dir, cache_dir="cache", jobs=1, command=None, progress=None) -> GridResult(done, skipped, failed)`:
+      - Cells run in parallel, never split: each runs from start to end as one task of a `ProcessPoolExecutor`, so its LLM call IDs belong to one worker (§7). With `jobs=1` the cells run in this process.
+      - The factory runs in the worker. It is sent there by reference, as a module-level function, and builds the proposer, whose LLM client cannot be pickled (§7). A factory that cannot be sent, such as a lambda, raises `GridError` before any cell starts when `jobs > 1`. Workers are spawned, not forked: a worker starts from a fresh interpreter, whatever threads the parent has.
+      - A cell's log is the text of `RunLog.to_json()`, so it is the same at any `jobs`. It is written to a temporary file in the same directory and renamed, so a killed run leaves no partial log.
+      - Resume: a cell is skipped when its log exists, loads, holds that cell and has the arm's config.
+      - Anything in the out dir that disagrees with the arm stops the run before any cell starts, with a `GridError` that names it, and nothing in the out dir changes. This covers a manifest of another arm (by hash), a manifest that cannot be read, logs without a manifest, and a log of a requested cell that cannot be read, holds another cell or has another config. Logs without a manifest are refused because a log records its config but not its proposer kind, and two arms can share a config: the fixed and hybrid arms do. An out dir holds one arm: nothing is overwritten or mixed, and the user moves or deletes the old results.
+      - A cell that raises (any `Exception`; an interrupt still stops the run) is recorded with its traceback in the result and the manifest, and the other cells go on. It leaves no log, so the next run retries it. A worker that dies fails the cells it had not finished.
+      - The out dir is locked (`flock` on `<out>/.lock`) while a run uses it: a second run on it would send the same LLM calls.
+      - Workers start with `OMP_NUM_THREADS`, `OPENBLAS_NUM_THREADS` and `MKL_NUM_THREADS` at 1, unless they are already set. See Measured for why this is a precaution and not a fix.
+    - The manifest, `<out>/manifest.json`, records the arm once: `arm_hash`, `proposer`, `model` (`config.llm_model`) and the full `config`. Then `runs` gets one entry per invocation: the arm name, start and finish times, the git SHA of the code's checkout and whether its tree was dirty, the versions of Python, `mda-impl` and its runtime dependencies, the command line, worlds, seeds, `jobs`, the cache dir, the number of cells skipped, and for each cell run its status, seconds and, if it failed, its traceback. A resumed run adds an entry and leaves the earlier ones as they were, so cells run under another commit stay visible. The manifest is written atomically at the start, after each cell and at the end, so a killed run keeps its entry with the cells done so far.
+    - `select_worlds(spec)`: `all` (57), `canonical` (9), `compound` (48), or a comma-separated list of world IDs, which can be shortened to their number (`c0`).
+  - `mda/cli.py`: the `mda-impl` command, through `mda.main`, which imports it when called. `mda-impl run --arm <name or path.json> --worlds all --seeds 0,1,2 --out runs/<arm> --cache-dir cache --jobs 1`, where every value shown is the default but the arm. It uses subcommands, so `mda-impl report` (`feat/analysis`) can join it. It loads `.env`, and a variable already set wins. Paths are relative to the current directory, the repository root. The exit status is 0 when every cell is done, 1 when a cell failed (rerun the same command to retry it), and 2 for a usage error or a refused out dir.
+  - `configs/fixed.json`, the fixed-library arm: proposer `"null"`, no config field changed. The README's "Running the experiment" section shows the commands.
+  - Once `feat/proposer` has merged, the hybrid arm is a registry entry in `mda/grid.py` and an arm file, `configs/hybrid.json` (`{"description": ..., "proposer": "llm", "config": {}}`):
+
+    ```python
+    def _llm(ctx: CellContext) -> Proposer:
+        return claude_proposer(
+            ctx.config, call_prefix=ctx.call_prefix, cache_dir=ctx.cache_dir, transcript=ctx.transcript
+        )
+
+
+    PROPOSERS: dict[str, ProposerFactory] = {"null": _null, "llm": _llm}
+    ```
+
+- **Tests.** `tests/test_grid.py` covers the three cases planned for this branch, then the rest. Its cells stop after the initialisation (`n_active=0`, one random start per fit): the grid only moves logs around, and the seed still changes each log.
+  - The CLI runs a 2-cell grid into the default out dir, and a rerun reports both cells as skipped.
+  - Resume runs only the cells without a log, `run_cell` is not called for the others, and their logs are left byte for byte.
+  - Every arm file in `configs/` loads, and `fixed.json` is the null proposer with the default config.
+  - The logs written in this process and in two worker processes equal `run_cell(...).to_json()` byte for byte.
+  - A test proposer kind, registered in the test module, is built in a worker process, not in the test's, with the cell's arm, world, seed, config, out dir and cache dir, its call prefix, log and transcript paths, and single-threaded BLAS. The environment of the test's process is restored afterwards.
+  - A cell whose proposer raises `LLMError`, in a worker or in this process, is recorded with its traceback in the result and the manifest, leaves no log, and does not stop the other cells. The CLI then exits with 1, and the next run retries that cell alone.
+  - Each kind of disagreement is refused before any cell runs, leaving the out dir byte for byte as it was. These are a manifest of another config or another proposer kind, an unreadable manifest, logs without a manifest, and a log that is truncated, of another schema, of another cell or of another config. Through the CLI the refusal exits with 2. An arm that is renamed but otherwise the same resumes.
+  - A run interrupted at the moment of publishing a log leaves no log and no temporary file, and the next run runs that cell.
+  - The manifest records the arm's hash, proposer, model and config, and per run the git SHA and dirty flag as `git` reports them, the package versions, command line, worlds, seeds, jobs, cache dir and the status and time of each cell. A resumed run under another SHA adds an entry and keeps the first one unchanged.
+  - Arm files and names that are invalid are rejected. The digest changes with the proposer kind and with config fields, and not with the name or description. World selection and the CLI's parsing work, a locked out dir is refused, a factory that cannot reach a worker is refused, and an invalid grid is rejected before anything is written.
+  - A probe that waits until two cells' proposers have been built shows that two workers run cells at once.
+  - Each of these was checked by breaking `grid.py` and `cli.py` on purpose, one edit at a time, 54 edits in all. The edits covered:
+    - resume: rerunning completed cells, or skipping without checking a log's cell, its config or whether it can be read;
+    - what reaches a cell: the wrong seed, world, config or cache dir;
+    - writes: a non-atomic log write, or a temporary file left behind;
+    - failures: swallowed as success, killing the grid, counted as done, an interrupt recorded as a failure, or the wrong exit status;
+    - the manifest and the hash: each manifest field, overwriting earlier runs, a hash without the config or without the proposer kind, skipping the manifest checks;
+    - workers: running serially or on one worker whatever `jobs`, BLAS settings not set or not restored;
+    - the lock, the pickling check, call prefix, transcript and log paths, world selection, arm validation, and the CLI's seeds, default out dir, `.env`, arm path and recorded command.
+
+    The first version of the tests failed for 53 of them. The one that survived ran every cell on one worker whatever `jobs` was, which the rendezvous test above was added for. At least one test now fails for every edit.
+- **Measured.**
+  - M1, the fixed-library arm on all 171 cells with `mda-impl run --arm fixed --jobs 24`, on a 48-core machine shared with other jobs (load average about 15): 1 min 57 s wall time and 2,589 s of CPU. Cells took 8 to 25 s each, with a median of 15 s. No cell failed. No design fell back to a random condition, and no score was non-finite.
+  - Pass counts over the 171 cells: 53 at $B = 15$ (31.0%), 54 at $B = 20$ and 54 at $B = 25$ (31.6%). All 27 canonical-world cells pass at $B = 15$, $B = 20$ and $B = 25$. Seed 0 alone gives 17 at $B = 15$ and 18 at $B = 25$, the counts §5 measured with `run_cell`. Three logs from the grid, recomputed with `run_cell` in a single process with the default BLAS threads, were identical byte for byte.
+  - Running the same command again skipped all 171 cells in 1.2 s and left every log unchanged.
+  - BLAS: one process starts 95 threads, two OpenBLAS pools of 47 (numpy's and scipy's) and the main thread. They do not oversubscribe the cores: 24 cells in parallel took 15.9 s with the default BLAS threads and 15.6 s with `OPENBLAS_NUM_THREADS=1`, with the same per-cell times, because a cell's matrices are too small for OpenBLAS to use more than one thread. The workers are single-threaded anyway, which saves the idle threads and keeps the results independent of the thread count.
+  - `tests/test_grid.py` adds about 16 s to the test suite.
+- **Done when** milestone M1 is reached. Done.
 
 ### 7. `feat/llm-client` (done)
 
@@ -359,7 +413,7 @@ There are three tracks, which can proceed in parallel:
 
 | Milestone | Reached when | Check against the paper |
 | --- | --- | --- |
-| M1: MDA without an LLM | The fixed-library arm runs on all 171 cells with no API cost | Every canonical-world cell passes at $B = 15$ (Fig. 6) |
+| M1: MDA without an LLM (reached) | The fixed-library arm runs on all 171 cells with no API cost | Every canonical-world cell passes at $B = 15$ (Fig. 6). Reached: 27 of 27, and 53 of the 171 cells (§6) |
 | M2: Hybrid MDA | The pilot's cost is measured, then all 171 cells run | Pass rate near 74.9% at $B = 20$ and 78.4% at $B = 25$. The pool trajectory looks like Fig. 2b: expansions are rare and the cap drops to 6 once the fit is adequate |
 | M3: Baselines and controls | The random-design, fixed-scale-BIC, SMC and ICL arms run | Hybrid minus fixed pass rate at $B = 15$ is about +33 points. The CMA-ES/random nMSE ratio is below 1 under both backends. ICL is worse than MDA |
 | M4: Write-up | `docs/results-chembench.md` is merged | Every number in spec §8 is reproduced, or the difference is explained |
