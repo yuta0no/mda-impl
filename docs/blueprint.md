@@ -17,7 +17,7 @@ This blueprint lists what remains to reproduce the Model Discovery Agent (MDA) e
 
 ## Current state
 
-This is `main` with `feat/fit`, `feat/library`, `feat/posterior`, `feat/design` and `feat/llm-client` merged.
+This is `main` with `feat/fit`, `feat/library`, `feat/posterior`, `feat/design`, `feat/llm-client` and `feat/agent` merged.
 
 | Module | Contents | Merged in |
 | --- | --- | --- |
@@ -32,6 +32,10 @@ This is `main` with `feat/fit`, `feat/library`, `feat/posterior`, `feat/design` 
 | `mda.design` | `between_model_variance`, `cma_design`, `random_design` | `feat/design` |
 | `mda.llm` | `LLMClient` (the provider-neutral base), `ClaudeLLM`, `FakeLLM`, `Reply`, `StopReason`, `Usage`, `Pricing`, `ReplyCache`; `HYPOTHESES_SCHEMA` in `mda.hypothesis` | `feat/llm-client` |
 | `tools/llm_check.py` | Counts proposer-prompt tokens, or makes one real call | `feat/llm-client` |
+| `mda.config` | `MDAConfig`, every hyperparameter with its source, and `DEFAULTS`, from which the other modules read their keyword defaults | `feat/agent` |
+| `mda.propose` | The `Proposer` protocol, `Proposal`, `CallRecord` and `NullProposer` | `feat/agent` |
+| `mda.agent` | `MDAAgent` (Alg. 2): `design`, `update_state`, `get_model`, `get_predictor` | `feat/agent` |
+| `mda.run` | `run_cell` (Alg. 1), `RunLog` and its JSON format, `passive_design`, `query_set` | `feat/agent` |
 | `prompts/chem_propose.txt` | The proposer prompt, verbatim from App. G.1 | — |
 | CI | pre-commit, ty, and pytest on Python 3.12 and 3.13 | `dev/ci` (#2), `dev/ty` (#3) |
 | Tooling | ty as a pre-commit hook, and the Development section of the README | `dev/ty-precommit` (#5) |
@@ -42,12 +46,12 @@ This is `main` with `feat/fit`, `feat/library`, `feat/posterior`, `feat/design` 
 src/mda/
   bench.py, metrics.py, arrays.py, hypothesis.py, fit.py, library.py   done
   pool.py, posterior.py, design.py                                     done
-  config.py     feat/agent        MDAConfig: every hyperparameter, each citing the paper or a D-number
-  agent.py      feat/agent        MDAAgent: init, design, update_state, get_model, get_predictor (Alg. 2)
-  propose.py    feat/agent        Proposer protocol and NullProposer
+  config.py     feat/agent        MDAConfig: every hyperparameter, each citing the paper or a D-number (done)
+  agent.py      feat/agent        MDAAgent: init, design, update_state, get_model, get_predictor (Alg. 2) (done)
+  propose.py    feat/agent        Proposer protocol and NullProposer (done)
                 feat/proposer     LLMProposer: prompt rendering, parse, dedupe, retry
   llm.py        feat/llm-client   LLM clients, reply cache, transcripts, usage and cost (done)
-  run.py        feat/agent        run_cell: Alg. 1 for one (world, seed), with a JSON run log
+  run.py        feat/agent        run_cell: Alg. 1 for one (world, seed), with a JSON run log (done)
                 feat/runner       grid over worlds × seeds × arms, CLI, resume, manifest
   smc.py        feat/smc          tempered-SMC evidence (control arm)
   icl.py        feat/icl          ICL (+MDA design) and ICL (+LLM design)
@@ -78,7 +82,7 @@ flowchart TD
     fit --> posterior["feat/posterior (done)"]
     main --> design["feat/design (done)"]
     main --> llmc["feat/llm-client (done)"]
-    library --> agent["feat/agent"]
+    library --> agent["feat/agent (done)"]
     posterior --> agent
     design --> agent
     agent --> runner["feat/runner"]
@@ -97,9 +101,9 @@ flowchart TD
 
 There are three tracks, which can proceed in parallel:
 
-- **Numerics:** `feat/fit`, `feat/library`, `feat/posterior` and `feat/design` (done) → `feat/agent` → `feat/runner`.
-- **LLM:** `feat/llm-client` (done). `feat/proposer` waits for `feat/agent`.
-- **Evaluation:** `feat/analysis`, `feat/icl` and `feat/smc` start once the run-log schema from `feat/agent` is fixed.
+- **Numerics:** `feat/fit`, `feat/library`, `feat/posterior`, `feat/design` and `feat/agent` (done) → `feat/runner`.
+- **LLM:** `feat/llm-client` (done). `feat/proposer` can start now.
+- **Evaluation:** `feat/analysis`, `feat/icl` and `feat/smc` build on the run-log schema from `feat/agent`, which is fixed: `mda.run.RunLog`, schema 1.
 
 | # | Branch | Scope | Depends on | Milestone |
 | --- | --- | --- | --- | --- |
@@ -107,7 +111,7 @@ There are three tracks, which can proceed in parallel:
 | 2 | `feat/library` (done) | The 9 canonical seed laws | `feat/fit` | M1 |
 | 3 | `feat/posterior` (done) | Pool, BIC, weights, pruning, adaptive cap | `feat/fit` | M1 |
 | 4 | `feat/design` (done) | $V(a)$, CMA-ES, random design | main | M1 |
-| 5 | `feat/agent` | MDA agent loop, predictive check, one-cell runner | 2, 3, 4 | M1 |
+| 5 | `feat/agent` (done) | MDA agent loop, predictive check, one-cell runner | 2, 3, 4 | M1 |
 | 6 | `feat/runner` | Grid runner, CLI, arm configs | 5 | M1 |
 | 7 | `feat/llm-client` (done) | LLM clients, reply cache, cost accounting | main | M2 |
 | 8 | `feat/proposer` | LLM proposer and the hybrid arm | 5, 7 | M2 |
@@ -125,7 +129,7 @@ There are three tracks, which can proceed in parallel:
   - `relative_residuals(y, y_hat, c)` (D5).
   - `residual_input_spearman(X, y, y_hat)`: the residual–input Spearman correlations used in the prompt (D6), one per input in the order of `INPUT_NAMES`. A correlation is 0 when the input or the residual is constant, and all seven are NaN when any residual is non-finite.
   - `Model`, the type of a compiled hypothesis, added to `mda/hypothesis.py`.
-- **Constants.** $\rho$, $\sigma_{\mathrm{floor}}$, $c$ and the two-decade threshold are module constants of `mda/fit.py` (`RHO`, `SIGMA_FLOOR`, `REL_FLOOR`, `LOG_SPAN`) until `feat/agent` adds `MDAConfig`.
+- **Constants.** $\rho$, $\sigma_{\mathrm{floor}}$, $c$ and the two-decade threshold were module constants of `mda/fit.py`. Since `feat/agent` they are the `MDAConfig` fields `rho`, `sigma_floor`, `rel_floor` and `log_span`, and `fit` and `residuals` take $\rho$, $\sigma_{\mathrm{floor}}$ and the threshold as arguments.
 - **Dependencies.** `scipy`, added with `uv add`.
 - **Tests.** `tests/test_fit.py` covers the five cases planned for this branch, then the starts and the error handling:
   - Recovers known constants from noiseless Michaelis–Menten and Hill data.
@@ -165,7 +169,7 @@ There are three tracks, which can proceed in parallel:
     - `adaptive_cap(w, fit_err)` returns 6 or 24 (spec §4).
   - `normalise_expr` in `mda/hypothesis.py`: the dedupe key. It shares the comment and whitespace handling of `compile_hypothesis`.
   - Models with non-finite RSS get BIC = inf and weight 0, and are pruned first. When no model has a finite RSS, every weight is 0.
-- **Constants.** `N_STARTS` in `mda/pool.py`, and `RSS_FLOOR`, `TAU_C`, `TAU_FIT`, `N_MIN` and `N_MAX` in `mda/posterior.py`, are module constants until `feat/agent` adds `MDAConfig`. The functions already take them as arguments.
+- **Constants.** `N_STARTS` in `mda/pool.py`, and `RSS_FLOOR`, `TAU_C`, `TAU_FIT`, `N_MIN` and `N_MAX` in `mda/posterior.py`, were module constants. Since `feat/agent` they are the `MDAConfig` fields `n_starts`, `rss_floor`, `tau_c`, `tau_fit`, `n_min` and `n_max`. The functions take them as arguments.
 - **Tests.** `tests/test_posterior.py`, `tests/test_pool.py` and the `normalise_expr` cases in `tests/test_hypothesis.py` cover the six cases planned for this branch, then the pool's bookkeeping:
   - BIC values against hand computation.
   - Weights sum to 1, and their order is consistent with BIC.
@@ -186,7 +190,7 @@ There are three tracks, which can proceed in parallel:
   - `cma_design(weights, predictors, *, rng, n_evals=48, sigma0=0.3, space)` returns the next condition in natural units (D10). pycma runs with its termination criteria ignored, so it always makes exactly `n_evals` evaluations; with the default population of 9, the sixth generation is cut to 3 points and not told to pycma. It returns the best point evaluated, ties going to the earliest, and never a NaN point. When $V$ is NaN at every point evaluated, it raises `DesignError`. pycma samples through `rng`, so it neither reads nor reseeds the global NumPy random state.
   - `random_design(rng)`: uniform in the unit box, the distribution of `World.heldout`.
   - Building the predictors from a pool is left to `feat/agent`: `lambda X, c=c: c.f(c.fit.theta, X)` for each candidate `c`.
-- **Constants.** `N_EVALS` and `SIGMA0` are module constants of `mda/design.py` until `feat/agent` adds `MDAConfig`. The functions already take them as arguments.
+- **Constants.** `N_EVALS` and `SIGMA0` were module constants of `mda/design.py`. Since `feat/agent` they are the `MDAConfig` fields `n_evals` and `sigma0`. The functions take them as arguments.
 - **Dependencies.** `cma`, added with `uv add`.
 - **Tests.** `tests/test_design.py` covers the four cases planned for this branch, then the edge cases:
   - $V$ matches hand computation in both spaces. $V = 0$ when all models agree or one model has weight 1, and $V \ge 0$ otherwise.
@@ -199,26 +203,67 @@ There are three tracks, which can proceed in parallel:
   - Each of these was checked by breaking `cma_design` on purpose: minimising $V$, never updating pycma, dropping the bounds, returning the final mean, reversing the tie rule, ranking NaN points first, returning a point when none is defined, letting a later generation replace a better earlier point, keeping an overflowing $V$ as infinite, and not validating `space`. At least one test fails for each.
 - **Measured.** A design for a 24-model pool of seed laws takes about 10 ms.
 
-### 5. `feat/agent`
+### 5. `feat/agent` (done)
 
-- **Scope.**
-  - `mda/config.py`: `MDAConfig`, one dataclass with every value in spec §1–6 and D1–D15. Each field has a comment citing the paper or a D-number. It takes over `RHO`, `SIGMA_FLOOR`, `REL_FLOOR` and `LOG_SPAN` from `mda/fit.py`, `N_STARTS` from `mda/pool.py`, and `RSS_FLOOR`, `TAU_C`, `TAU_FIT`, `N_MIN` and `N_MAX` from `mda/posterior.py`. `fit` and `residuals` do not yet accept $\rho$, $\sigma_{\mathrm{floor}}$ or the threshold as arguments, so they change here too.
-  - `mda/propose.py`: the `Proposer` protocol, `propose(kind, pool, D, budget_left) -> list[Hypothesis]`, plus `NullProposer`.
-  - `mda/agent.py`: `MDAAgent` implementing Alg. 2, with the predictive check (both variants, D5), $R_m$ and $N_e^{\max}$ gating (D4), adaptive cap and pruning, a current-data MAP `get_model`, and a plug-in `get_predictor`. Its design step catches `DesignError` from `cma_design` (spec §6), falls back to `random_design` and records the fallback in the run log.
-  - `mda/run.py`: `run_cell(world, seed, config, proposer) -> RunLog` (Alg. 1). It evaluates RMSLE on the 1000-point grid, nMSLE on the 60-point query set (D11) and pass, at every $B$ from 3 to 25. The JSON run log records, per step: $x$, $y$, $e^*$, whether the pool expanded, the cap, and a pool snapshot (expression, $\hat\theta$, RSS, BIC, weight, origin, `added_at`), plus the LLM call IDs.
-- **Tests.**
+- **Scope.** As built:
+  - `mda/config.py`: `MDAConfig`, a frozen dataclass with every value in spec §1–6 and D1–D15, each field commented with the paper location or the D-number it comes from. `DEFAULTS` is the primary arm.
+    - It took over the module constants of `mda/fit.py`, `mda/pool.py`, `mda/posterior.py`, `mda/design.py` and `mda/llm.py`. Those modules now read their keyword defaults from `DEFAULTS`, and `fit`, `residuals` and `Pool.refit` take $\rho$, $\sigma_{\mathrm{floor}}$ and the two-decade threshold as arguments.
+    - The module imports nothing from `mda`, so every module can import it. It also holds the option types (`Residual`, `Bic`, `Check`, `Design`, `Space`, `ClaudeEffort`).
+    - `to_dict` and `from_dict` convert to and from JSON-compatible values, for run logs and arm configs. Values that make no sense raise `ValueError`.
+    - The fields `n_init`, `n_new`, `max_attempts`, `structured_output` and `prompt_phase` are there for `feat/proposer`; nothing reads them yet.
+  - `mda/propose.py`: the `Proposer` protocol and `NullProposer`. The signature differs from the one planned, `propose(kind, pool, D, budget_left) -> list[Hypothesis]`, in three ways:
+    - It is `propose(kind, pool, X, y, *, weights, budget_left)`. The weights identify the MAP form, which the D6 prompt fields refer to. At initialisation the pool holds the unfitted library and `weights` is `None`.
+    - `pool` is a sequence of `Candidate`s, not the `Pool`: the agent passes a snapshot (a tuple), its data as arrays marked read-only, and a copy of its weights. A proposer therefore changes the pool only through the hypotheses it returns.
+    - It returns a `Proposal(hypotheses, calls)`, where `calls` holds one `CallRecord(call_id, request_id)` per LLM request. This is how the LLM call IDs reach the run log.
+  - `mda/agent.py`: `MDAAgent`, Alg. 2. The constructor is `init`: `MDAAgent(X0, y0, seed=..., config=..., proposer=..., library=SEED_LIBRARY)`.
+    - Initialisation (Alg. 11): the library plus one `"init"` proposal, fitted, weighted and pruned to $N_{\max}$. The adaptive cap is first applied by an update. An empty pool raises `ValueError`.
+    - `update_state(x, y)`: the predictive check; the datum joins the data and the pool is refitted, reweighted and pruned to $N_{\max}$; up to $R_m$ expansion rounds while $e^* > \tau_e$ and $n_e < N_e^{\max}$ (D4); then the adaptive cap (Alg. 10). After a round, $e^*$ is the in-sample error of the new MAP model. A round counts towards $n_e$ whatever it adds. The pool is rescored only when a round added something, so `NullProposer` costs no extra fits.
+    - The predictive check (D5). `"cached"` is the MAP model's in-sample median relative residual from the preceding fit, and does not look at the new datum. `"prequential"` is Alg. 13: the relative error of the MAP model's prediction at the new point, in a median with the stored data's errors when `backtest` is on. A check that cannot be evaluated is infinite, which asks for candidates.
+    - The cap is chosen afresh at the end of every update: within an update the pool is pruned to $N_{\max}$, not to the previous update's cap. When the cap is below the pool size, the models with the largest weights are kept and refitted. Discarded models do not come back.
+    - `design()` maximises $V(a)$ with `cma_design`, or draws `random_design` in the random-design arm. On `DesignError` it falls back to a random design and sets `last_design` to `"fallback"`, which the run log records.
+    - `get_model()` is the current-data MAP candidate and `get_predictor()` its plug-in predictor. When no candidate has a finite fit, every weight is 0, `map_index` is `None`, and the predictor is the first candidate's, whose non-finite predictions score as a failure.
+    - Each step's fits and each design draw from generators seeded by (cell seed, step, stream) (D8). A cell is therefore reproducible, and `design()` returns the same condition until the next update.
+    - Public state is for reading. Every public name (`X`, `y`, `pool`, `weights`, `log_weights`, `bic`, `map_index`, `cap`, `n_e`, `step`, `info`, `last_design`, `seed`, `config`, `proposer`) is a property without a setter over a private attribute, so assigning to one raises `AttributeError`. `X` and `y` are copies of the caller's arrays, marked read-only; `pool` is a tuple of the frozen candidates; the per-model arrays are copies. `FitResult` marks its `theta` and `y_hat` read-only as well, since a candidate's fit is shared by every snapshot. Only `update_state` and `design` change the agent.
+  - `mda/run.py`: `run_cell(world, seed, config, proposer) -> RunLog` (Alg. 1), with `passive_design` ($D_0$) and `query_set` (D11: seeded by the CRC-32 of `"<world>:<seed>"`).
+    - It evaluates the predictor after the initialisation and after every update, so at every $B$ from 3 to 25: RMSLE and pass on the test grid (`TEST_SEED` and `N_TEST`, now in `mda.bench`), and nMSLE on the query set.
+    - `RunLog` (schema 1) holds the world, the seed, the proposer's class name, the config, $D_0$, and one `StepRecord` per $B$: $x$, $y$, how $x$ was chosen (`"cma"`, `"random"` or `"fallback"`), $e^*$, `n_added`, $n_e$, the cap, the MAP index, the LLM calls, the evaluation, and a pool snapshot (name, expression, parameter names, $\hat\theta$, RSS, BIC, weight, `fit_err`, origin, `added_at`). `expanded` is `n_added > 0`.
+    - `to_json` writes strict JSON: a non-finite number becomes the string `"inf"`, `"-inf"` or `"nan"`, which `from_json` reads back.
+- **Tests.** `tests/test_config.py`, `tests/test_agent.py` and `tests/test_run.py` cover the four cases planned for this branch, then the rest:
   - With `NullProposer`, the pool never expands.
   - With a fake proposer, the pool expands exactly when $e^* > \tau_e$, respecting $R_m$, $N_e^{\max}$ and the cap.
   - The run log has 23 evaluation points and survives a JSON round trip.
-  - A smoke run on `c0_michaelis_menten` with the fixed library passes at $B = 25$.
-- **Done when** one cell runs end to end with no API calls.
+  - A smoke run on `c0_michaelis_menten` with the fixed library passes at $B = 25$. It uses 2 random starts per fit instead of 8, which keeps it under 10 seconds with the tests' runtime type checks.
+  - The config's defaults match the spec, value by value, and every keyword default in `fit`, `pool`, `posterior`, `design` and `llm` equals the config's.
+  - The cached check reacts to a surprise one update later and the prequential one at once; with back-testing, the stored data outvote a single surprising point.
+  - The cap drops only when one model is dominant and fits, by the configured $\tau_c$ and $\tau_{\mathrm{fit}}$, and it is decided on the pool as the update leaves it, after any expansion. The best models are kept and refitted, and a later, higher cap does not restore the others.
+  - The gate uses the configured $\tau_e$, and an error equal to it does not expand. An expansion call is shown the fits and weights of the data it is given. Ties for the largest weight go to the candidate added first.
+  - The pool is refitted once per update, once more after a round that adds candidates, and once more after the cap removes some. The config's settings reach `Pool.refit`.
+  - `design()` returns what `cma_design` returns for the pool's weights and plug-in predictors, under the configured settings and the step's generator. In the state tested, each setting and the pairing of weights with predictors change that design. The random arm returns the generator's first uniform draw.
+  - A law that is finite only at the temperature of $D_0$ leaves $V(a)$ undefined: the design falls back to a random condition, in the agent and, with a proposer that supplies such a law, in a run log. The fallback is not the random arm's draw, because CMA-ES has already drawn from the generator.
+  - A pool without a finite fit does not crash, and new candidates rescue it.
+  - A cell is reproducible for a given seed, and the global random state is neither used nor changed. The fits of step $k$ equal those of a pool refitted with a generator seeded by (seed, $k$, 1), and the designs use (seed, $k$, 2).
+  - The agent is given the cell's config and seed and the observations the log records. The logged MAP model (expression, parameter names, $\hat\theta$) reproduces the logged RMSLE, nMSLE and pass at every step of five logs, each on its own cell's query set. A cell that passes on the test grid and not on its query set is recorded as passed.
+  - A log replayed through a fresh agent, from its config, seed, $D_0$ and observations, matches it field by field and design by design, in a run where the cap drops and in one where every update expands.
+  - Public state is read-only: no public name is a plain attribute or has a setter, a write to `X`, `y` or a fit's arrays raises, and a proposer that tries to change everything it is given leaves the run identical to one with a proposer that does not. Removing any one of these guards, in 13 ways, fails a test.
+  - These were checked by breaking `agent.py` and `run.py` on purpose, one edit at a time, in three rounds.
+    - The first 62 edits: inverting the gate, ignoring $R_m$ or $N_e^{\max}$, skipping the adaptive cap, pruning an expansion to the previous cap, ignoring a config value, scoring on the wrong set, and so on.
+    - Then 42 chosen by an independent review of the tests. The first version of the tests stayed green under 32 of its 35 edits that change behaviour, mostly in values that reach the results: a `passed` that is always true, a query set that ignores the seed, weights paired with the wrong predictors in the design, a cap decided on the previous update's error, logged values that differ from the agent's.
+    - Then 30 more, after the tests were tightened in response.
+    - At least one test now fails for every edit but three, which change nothing observable: pruning to the previous cap at the start of an update, when the pool is already within it; logging $N_{\max}$ or $N_{\min}$ according to the cap, which is always one of the two; and assigning the sorted BICs by weight rank, which is the same order when $\lambda = 0$.
+    - Two refactors that keep the behaviour, importing `mda.design` as a module and giving the agent `__slots__`, leave every test green. The first version failed four tests under them.
+- **Measured.**
+  - The fixed-library arm passes on all 27 canonical cells (9 worlds × 3 seeds) at $B = 15$ and at $B = 25$, with every default: the M1 check, ahead of `feat/runner`. In each cell the stable passes start between $B = 3$ and $B = 13$.
+  - On seed 0 of all 57 worlds, the fixed-library arm passes 17 at $B = 15$ and 18 at $B = 25$, with no crash, no design fallback and no non-finite score. The random-design, fixed-scale-BIC, prequential-check and `log1p` configs also ran without error on four worlds each.
+  - A fixed-library cell takes about 11 s on one core: 6 s on a canonical world where the cap drops early, and up to 17 s elsewhere.
+  - On `c0_michaelis_menten` the MAP model at $B = 25$ is the Arrhenius seed, not Michaelis–Menten, in all three seeds. Its temperature factor absorbs part of the oracle's background factor, which the observations contain and the scores do not (README, "Benchmark behaviour"). The cell still passes, at an RMSLE near 0.02.
+- **Done when** one cell runs end to end with no API calls. Done.
 
 ### 6. `feat/runner`
 
 - **Scope.**
   - The CLI: `mda-impl run --arm {hybrid,fixed,random,fixed-tau,...} --worlds ... --seeds 0,1,2 --out runs/<arm>`.
   - Multiprocessing across cells, resuming by skipping completed cells, and a manifest recording the git SHA, config hash, package versions and model ID.
-  - Arm configs in `configs/`, with `runs/` and `cache/` added to `.gitignore`.
+  - Arm configs in `configs/`, with `runs/` and `cache/` added to `.gitignore`. An arm config is the fields of `MDAConfig` that differ from the defaults, loaded with `MDAConfig.from_dict`; a cell is `run_cell(world, seed, config, proposer)`, and its log is written with `RunLog.to_json`.
 - **Tests.**
   - The CLI runs a 2-cell grid.
   - Resume skips completed cells.
@@ -240,7 +285,7 @@ There are three tracks, which can proceed in parallel:
   - `Pricing` and `Rates`, with Haiku 5.5's two rate cards (\$0.10 / \$0.50 per MTok, or \$0.50 / \$2.50 for prompts over 100K tokens) and cache multipliers of 1.25x for writes and 0.1x for reads.
   - `FakeLLM`: scripted replies (texts, full `Reply` objects or exceptions), or a function of the request. It records the requests that reach it.
   - `HYPOTHESES_SCHEMA` in `mda/hypothesis.py`: the `chem_propose.txt` reply format as a structured-output JSON schema.
-- **Constants.** `DEFAULT_MODEL`, `DEFAULT_EFFORT`, `DEFAULT_MAX_TOKENS` (16,000, thinking included; non-streaming requests must stay under the SDK's limit of about 21K) and `DEFAULT_MAX_RETRIES` (5: SDK retries with exponential backoff) are module constants of `mda/llm.py` until `feat/agent` adds `MDAConfig`.
+- **Constants.** `DEFAULT_MODEL`, `DEFAULT_EFFORT`, `DEFAULT_MAX_TOKENS` (16,000, thinking included; non-streaming requests must stay under the SDK's limit of about 21K) and `DEFAULT_MAX_RETRIES` (5: SDK retries with exponential backoff) were module constants of `mda/llm.py`. Since `feat/agent` they are the `MDAConfig` fields `llm_model`, `llm_effort`, `llm_max_tokens` and `llm_max_retries`, from which `ClaudeLLM` reads its defaults.
 - **Tests.** `tests/test_llm.py` runs `ClaudeLLM` against an `httpx2.MockTransport`, so the real SDK builds the requests and parses the replies, and no test calls the API:
   - The base class through a third backend defined in the test file, written as a new provider's would be: it gets the cache, the transcript and the totals, and its own setting enters the cache key.
   - A cache hit makes no network call, including from a new client as in a rerun. A cached reply equals the original in every field but `cached`. The system prompt, user prompt, schema, call ID, model, effort and `max_tokens` are each part of the key. Errors are not cached, and a corrupt entry is a miss.
@@ -256,10 +301,11 @@ There are three tracks, which can proceed in parallel:
 
 ### 8. `feat/proposer`
 
-- **Scope.** `LLMProposer` in `mda/propose.py`:
+- **Scope.** `LLMProposer` in `mda/propose.py`, implementing `Proposer.propose(kind, pool, X, y, *, weights, budget_left) -> Proposal`, where `pool` is a sequence of `Candidate`s and every argument is for reading only (§5):
   - Renders the init and expand prompts. The template follows `chem_propose.txt`: the init prompt has no refining section, and the expand prompt adds the refining section and the budget/phase line, filled in as described in D6.
   - Then `parse_hypotheses`, dedupe against the pool, and a cap at $N$ (12 at init, 6 per expansion), with the retry policy of D14.
-  - Calls `LLMClient.complete` with `schema=HYPOTHESES_SCHEMA` and a `call_id` per attempt, such as `<arm>/<world>/s<seed>/call<k>/try<a>`. Each retry needs a new `call_id`, because the cache would replay the unusable reply for the same one. The run log records the `call_id` and `request_id` of every attempt.
+  - Calls `LLMClient.complete` with `schema=HYPOTHESES_SCHEMA` and a `call_id` per attempt, such as `<arm>/<world>/s<seed>/call<k>/try<a>`. Each retry needs a new `call_id`, because the cache would replay the unusable reply for the same one. The run log records the `call_id` and `request_id` of every attempt: return them as `Proposal.calls`.
+  - The request sizes, the retry limit and the D6 and D15 switches are the `MDAConfig` fields `n_init`, `n_new`, `max_attempts`, `prompt_phase` and `structured_output`.
   - Wiring for the `hybrid` arm.
 - **Tests.**
   - Snapshot tests of the rendered prompts.
@@ -324,7 +370,7 @@ The paper's numbers come from GPT-5.6-Luna, and ours from Claude Haiku 5.5, so m
 
 - **Branches.** `feat/<name>` for library code, `dev/<name>` for tooling and docs, `exp/<name>` for experiment runs and results. Each branch is cut from `main` after its dependencies merge, and becomes one PR into `main` with CI green (pre-commit, ty, pytest).
 - **Commits.** Messages start with `add:`, `update:`, `fix:` or `rm:`, as in the existing history.
-- **Hyperparameters.** Every hyperparameter lives in `MDAConfig`, never inline, with a comment citing the paper location or a D-number from the spec. When a default changes, update the spec in the same PR.
+- **Hyperparameters.** Every hyperparameter lives in `MDAConfig`, never inline, with a comment citing the paper location or a D-number from the spec. Functions take the values as arguments, and read their keyword defaults from `mda.config.DEFAULTS`. A new field also goes into `tests/test_config.py`, which checks every default against the spec. When a default changes, update the spec in the same PR.
 - **Tests.** Tests never call the Claude API; use `FakeLLM` or a fake `Proposer`. Array-typed functions use the jaxtyping aliases in `mda.arrays`, so pytest checks shapes at run time.
 - **Dependencies.** Add them with `uv add`, in the branch that first needs them: `scipy` (`feat/fit`, added), `cma` (`feat/design`, added), `matplotlib` (`feat/analysis`).
 - **Vendored code.** `src/mda/_vendor` stays identical to upstream.
@@ -332,7 +378,7 @@ The paper's numbers come from GPT-5.6-Luna, and ours from Claude Haiku 5.5, so m
 ## Cost and compute
 
 - **API.** The hybrid arm makes at most 23 proposer calls per cell (1 at initialisation and up to 22 expansions, D4), over 171 cells. The estimate in [api-cost-estimation.md](./api-cost-estimation.md) stands until the M2 pilot replaces it with measured usage. Only the fixed-library arm makes no calls. The random-design, fixed-scale-BIC and SMC controls make their own expansion calls; the paper's fixed-scale arms reuse the paired arm's initialisation reply (Fig. 7 caption) instead of making a new call.
-- **CPU.** Each update refits at most 24 models with 9 starts each (8 random starts and a warm start) on at most 25 points, and runs 48 CMA-ES evaluations of $V(a)$. A seed law fits in about 40 ms, so refitting a full pool takes about a second, and longer when the laws have more parameters. This is cheap, so parallelise across cells, not within them. SMC costs about 100 particles × rungs × moves per model per update, which is why the paper limits it to a 12-world cohort (D12).
+- **CPU.** Each update refits at most 24 models with 9 starts each (8 random starts and a warm start) on at most 25 points, and runs 48 CMA-ES evaluations of $V(a)$. A seed law fits in about 40 ms, so refitting a full pool takes about a second, and longer when the laws have more parameters. A whole fixed-library cell, 9 seeds and 22 updates, was measured at about 11 s on one core, so that arm's 171 cells take about half an hour of CPU. This is cheap, so parallelise across cells, not within them. SMC costs about 100 particles × rungs × moves per model per update, which is why the paper limits it to a 12-world cohort (D12).
 
 ## Future to-dos
 
