@@ -76,6 +76,10 @@ class Proposer(Protocol):
         The proposer decides how many hypotheses to return, and every one must compile:
         `Pool.add` raises `HypothesisError` otherwise. It need not remove duplicates of the pool,
         which `Pool.add` drops. An empty proposal is valid: the agent goes on with the pool it has.
+
+        A proposer that reads hyperparameters from an `MDAConfig` holds it as the attribute
+        `config`. `MDAAgent` refuses a proposer whose `config` differs from its own, so that the
+        config in the run log is the one the proposer used.
         """
         ...
 
@@ -310,10 +314,13 @@ class LLMProposer:
 
     One instance serves one cell: the first call must be the initialisation, and there is only
     one. `LLMError` from the client, a request that failed, is raised.
+
+    `config` must be the config of the cell: `MDAAgent` raises `ValueError` for a proposer whose
+    config differs from its own.
     """
 
     def __init__(self, llm: LLMClient, *, call_prefix: str, config: MDAConfig = DEFAULTS) -> None:
-        """`call_prefix` names the cell, as `<arm>/<world>/s<seed>`."""
+        """`call_prefix` names the cell, as `<arm>/<world>/s<seed>`. `config` is the cell's."""
         self._llm = llm
         self._call_prefix = call_prefix
         self._config = config

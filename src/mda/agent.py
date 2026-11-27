@@ -14,7 +14,7 @@ from its `MDAConfig`, and every hypothesis beyond the seed library from its `Pro
 
 import math
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from typing import Literal
 
 import numpy as np
@@ -93,9 +93,14 @@ class MDAAgent:
         `seed` is the cell seed: with the step, it seeds every fit and every design (D8), so two
         agents given the same arguments and observations behave identically. Raises `ValueError`
         when the pool is empty: no library and no usable proposal.
+
+        A cell has one config. A proposer that reads hyperparameters holds its `MDAConfig` as
+        `config` (see `Proposer`), and one that differs from the agent's raises `ValueError`
+        before the proposer is asked anything.
         """
         self._config = config
         self._proposer: Proposer = NullProposer() if proposer is None else proposer
+        _check_config(self._proposer, config)
         self._seed = seed
         # Copies of the caller's arrays. The data are replaced at each update, never edited
         self._X: Conditions = _frozen(np.array(X0, dtype=float))
@@ -367,6 +372,24 @@ class MDAAgent:
             keep, _ = prune_top(self._log_w, self._cap)
             self._pool.keep(keep)
             self._score(rng, self._cap)
+
+
+def _check_config(proposer: Proposer, config: MDAConfig) -> None:
+    """Raise `ValueError` when `proposer` holds an `MDAConfig` other than `config`.
+
+    The run log records the agent's config as the cell's. A proposer built from another one
+    would ask for a different number of laws, or render a different prompt, than the log says.
+    """
+    other = getattr(proposer, "config", None)
+    if not isinstance(other, MDAConfig) or other == config:
+        return
+    differing = [
+        f.name for f in fields(config) if getattr(config, f.name) != getattr(other, f.name)
+    ]
+    raise ValueError(
+        f"the proposer's config differs from the agent's in {differing}: "
+        "build the proposer from the config of the cell"
+    )
 
 
 def _frozen(a: np.ndarray) -> np.ndarray:
