@@ -13,7 +13,7 @@ import pytest
 
 import mda
 from mda.agent import MDAAgent
-from mda.bench import INPUT_NAMES
+from mda.bench import INPUT_NAMES, from_unit
 from mda.config import DEFAULTS, MDAConfig
 from mda.fit import FitResult, relative_residuals
 from mda.hypothesis import (
@@ -32,6 +32,7 @@ from mda.propose import (
     LLMProposer,
     Proposal,
     Proposer,
+    _load_template,
     claude_proposer,
     correlated_input,
     map_index,
@@ -41,6 +42,7 @@ from mda.run import RunLog, run_cell
 
 # The template, read here without the module's parser: the prompts are checked against the file
 TEMPLATE = (Path(mda.__file__).parent / "prompts" / "chem_propose.txt").read_text().splitlines()
+TEMPLATE_TEXT = "\n".join(TEMPLATE)
 
 PREFIX = "hybrid/c0_michaelis_menten/s0"
 MM, COMPETITIVE = SEED_LIBRARY[0], SEED_LIBRARY[1]
@@ -286,6 +288,48 @@ def test_placeholders_are_filled():
         assert found is not None and found.group(1) == n
 
 
+@pytest.mark.parametrize(
+    ("old", "new"),
+    [
+        ("\n\n[budget/phase", "\n[budget/phase"),
+        ("SYSTEM:", "SYSTEM"),
+        ("USER (", "USER: ("),
+        ("[when refining", "when refining"),
+        ("negative evidence:]", "negative evidence:"),
+        ("[budget/phase", "(budget/phase"),
+        ("  <one line per", "  one line per"),
+        ("r0=..>", "r0=.."),
+        ("  <per-form", "  per-form"),
+        ("<B>", "B"),
+        ("<explore|refine>", "explore"),
+        ("Propose N distinct", "Propose 12 distinct"),
+        ("Propose N distinct", "Propose N distinct N"),
+    ],
+    ids=[
+        "two parts merged",
+        "no SYSTEM header",
+        "no USER line",
+        "refining marker not opened",
+        "refining marker not closed",
+        "status marker",
+        "experiments placeholder not opened",
+        "experiments placeholder not closed",
+        "forms placeholder",
+        "no budget placeholder",
+        "no phase placeholder",
+        "no N",
+        "two N",
+    ],
+)
+def test_template_with_another_layout_is_refused(old: str, new: str):
+    # The module splits the file by its layout, so an edit that changes the layout must raise
+    # instead of dropping or misplacing a part of the prompt
+    assert _load_template(TEMPLATE_TEXT).system == SYSTEM_PROMPT
+    assert TEMPLATE_TEXT.count(old) == 1
+    with pytest.raises(ValueError, match="layout"):
+        _load_template(TEMPLATE_TEXT.replace(old, new))
+
+
 # The fields of the prompt (D6)
 
 
@@ -336,6 +380,34 @@ def test_form_is_its_dedupe_key_and_a_failed_fit_says_so():
     ) in lines
     assert "  k * log(C_I - 100) -- fit failed (no finite prediction on the data)" in lines
     assert all("#" not in line for line in lines)
+
+
+def test_full_size_prompt_lists_every_observation_and_every_form():
+    # The largest prompt of a cell: 25 observations and a pool at N_max = 24, most of it at
+    # weight 0. Nothing is cut, forms at the same weight keep the pool's order, and a form's
+    # input is taken from all of the data
+    rng = np.random.default_rng(0)
+    X = np.vstack([D0, from_unit(rng.uniform(size=(22, 7)))])
+    X[3:5, TEMP] = 310.0  # T is constant over the first five observations
+    y = rng.uniform(0.1, 5.0, size=25)
+    rel = rng.uniform(-0.5, 0.5, size=(24, 25))
+    rel[7] = (X[:, TEMP] - 320.0) / (100.0 * y)  # this form's residual rises with T
+    pool = tuple(fitted(power(p + 1), list(rel[p]), X, y) for p in range(24))
+    weights = np.zeros(24)
+    weights[[20, 3, 11]] = [0.5, 0.3, 0.2]
+    text = render_prompt("expand", pool, X, y, weights=weights, budget_left=0, n=6)
+
+    experiments = text.split("\n\n")[1].split("\n")[1:]
+    assert [line.split(" -> r0=")[1] for line in experiments] == [f"{v:.4g}" for v in y]
+    lines = form_lines(text)
+    order = [20, 3, 11, *(i for i in range(24) if i not in (20, 3, 11))]
+    assert [line.split(" -- ")[0].strip() for line in lines] == [pool[i].key for i in order]
+    assert [line.endswith("(current best form)") for line in lines] == [True] + [False] * 23
+    for i, line in zip(order, lines, strict=True):
+        fit = pool[i].fit
+        assert fit is not None
+        assert shown_input(line) == correlated_input(X, y, fit.y_hat)
+    assert shown_input(lines[order.index(7)]) == "T"
 
 
 @pytest.mark.parametrize(
@@ -486,10 +558,11 @@ def test_form_whose_residual_correlates_with_nothing_shows_only_its_residual():
 
 def test_advice_is_on_the_map_forms_line_only():
     # The template's advice for the current best form, folded into that form's line, with
-    # "that variable" for the template's "those variable(s)": there is one input
-    for best in (0, 1, 2):
-        weights = np.full(4, 0.1)
-        weights[best] = 0.7
+    # "that variable" for the template's "those variable(s)": there is one input. The best form
+    # is the one with the largest weight, also when that is less than half
+    for best, top in itertools.product((0, 1, 2), (0.7, 0.4)):
+        weights = np.full(4, (1 - top) / 3)
+        weights[best] = top
         c = POOL[best]
         assert c.fit is not None
         name = correlated_input(X5, Y5, c.fit.y_hat)
@@ -573,11 +646,25 @@ def test_phase_without_a_best_form_is_explore():
     assert "Current phase: explore (" in text
 
 
+@pytest.mark.parametrize(
+    ("err", "shown"),
+    [(0.123456, "0.1235"), (0.0500049, "0.05"), (1.23456e-05, "1.235e-05"), (12.3456, "12.35")],
+)
+def test_residuals_have_four_significant_digits(err: float, shown: str):
+    # Every number of the prompt has the format of the experiments (spec §9)
+    text = render_prompt(
+        "expand", with_best_error(err), X5, Y5, weights=WEIGHTS, budget_left=1, n=6
+    )
+    assert best_line(text).startswith(f"  {POOL[1].key} -- median relative residual {shown}; ")
+
+
 def test_expansion_needs_fitted_candidates_and_their_weights():
     with pytest.raises(ValueError, match="weight"):
         expand_prompt(weights=None)
     with pytest.raises(ValueError, match="weight"):
         expand_prompt(weights=WEIGHTS[:3])
+    with pytest.raises(ValueError, match="weight"):
+        expand_prompt(weights=np.append(WEIGHTS, 0.0))
     unfitted = (POOL[0], replace(POOL[1], fit=None))
     with pytest.raises(ValueError, match="no fit"):
         render_prompt("expand", unfitted, X5, Y5, weights=WEIGHTS[:2], budget_left=1, n=6)
@@ -678,7 +765,14 @@ def test_duplicates_of_the_pool_are_dropped_up_to_formatting():
     squared_again = law("squared_again", "kcat*Enz*C_A/(Km+C_A)**2", "kcat", "Km")
     # A renamed parameter makes a new expression (D13)
     renamed = law("renamed", "kcat*Enz*C_A/(K + C_A)", "kcat", "K")
-    p = proposer([laws(mm_again, power(2), renamed), laws(squared_again, power(3), mm_again)])
+    # A form whose fit failed is in the pool like any other
+    broken_again = law("broken_again", "k*log(C_I-100)", "k")
+    p = proposer(
+        [
+            laws(mm_again, power(2), renamed),
+            laws(squared_again, broken_again, power(3), mm_again),
+        ]
+    )
     assert init(p, pool=seed_pool()).hypotheses == (power(2), renamed)
     assert expand(p).hypotheses == (power(3),)
 
@@ -847,7 +941,7 @@ def test_no_request_when_no_law_is_asked_for(tmp_path: Path):
     q = proposer([laws(power(2)), laws(power(3))], replace(DEFAULTS, n_new=0))
     assert init(q).hypotheses == (power(2),)
     assert expand(q) == expand(q) == Proposal()
-    assert len(fake(q).requests) == 1
+    assert len(fake(q).requests) == 1 and q.n_calls == 3
     assert call_ids(transcript) == [f"{PREFIX}/call01/try1"]
 
 
@@ -928,6 +1022,23 @@ def test_rerun_with_the_cache_sends_nothing_and_gives_the_same_log(cache_dir: Pa
     )
     assert rerun == log
     assert (offline.requests, offline.n_sent, offline.n_cached) == ([], 0, 4)
+
+
+def test_proposer_must_hold_the_config_of_its_cell():
+    # The run log records one config, the agent's. A proposer built from another would ask for
+    # other numbers of laws or render another prompt than the log says, so it is refused before
+    # any request is made
+    p = proposer([laws(power(2))])  # built from DEFAULTS
+    with pytest.raises(ValueError, match=r"config differs .*\['n_active', 'n_starts', 'n_evals'\]"):
+        run_cell(FRACTAL, 0, SHORT, p)
+    cell = replace(DEFAULTS, n_starts=1, prompt_phase=False)
+    with pytest.raises(ValueError, match=r"config differs .*\['n_starts', 'prompt_phase'\]"):
+        MDAAgent(D0, Y5[:3], seed=0, config=cell, proposer=p)
+    assert fake(p).requests == [] and p.n_calls == 0
+    # An equal config is the cell's, whichever object holds it
+    q = proposer([laws(power(2))], replace(cell))
+    agent = MDAAgent(D0, Y5[:3], seed=0, config=cell, proposer=q)
+    assert agent.info.n_added == 1 and len(fake(q).requests) == 1
 
 
 # The hybrid arm's client (spec §9)
