@@ -12,6 +12,7 @@ from mda.fit import fit, relative_residuals, residuals, sigma
 from mda.llm import ClaudeLLM
 from mda.pool import Pool
 from mda.posterior import adaptive_cap, bic_profiled, log_prior
+from mda.smc import tempered_smc
 
 
 def test_defaults_follow_spec():
@@ -25,7 +26,10 @@ def test_defaults_follow_spec():
     # Spec §3, D1, D2, D8
     assert (c.rho, c.sigma_floor, c.residual) == (0.03, 0.01, "whitened")
     assert (c.n_starts, c.log_span) == (8, 100.0)
-    assert (c.bic, c.rss_floor, c.lam) == ("profiled", 1e-12, 0.0)
+    assert (c.evidence, c.bic, c.rss_floor, c.lam) == ("bic", "profiled", 1e-12, 0.0)
+    # Spec §8, D18: the SMC control
+    assert (c.n_particles, c.ess_fraction, c.n_moves, c.max_rungs) == (100, 0.5, 5, 100)
+    assert (c.step_scale, c.step_floor, c.param_prior) == (0.5, 1e-3, "log_uniform")
     # Spec §4
     assert (c.n_init, c.n_new, c.n_max, c.n_min) == (12, 6, 24, 6)
     assert (c.tau_c, c.tau_fit) == (0.9, 0.05)
@@ -69,6 +73,23 @@ def test_every_field_is_checked_by_the_spec_test():
         (Pool.refit, "sigma_floor", "sigma_floor"),
         (Pool.refit, "log_span", "log_span"),
         (bic_profiled, "rss_floor", "rss_floor"),
+        (tempered_smc, "n_particles", "n_particles"),
+        (tempered_smc, "ess_fraction", "ess_fraction"),
+        (tempered_smc, "n_moves", "n_moves"),
+        (tempered_smc, "max_rungs", "max_rungs"),
+        (tempered_smc, "step_scale", "step_scale"),
+        (tempered_smc, "step_floor", "step_floor"),
+        (tempered_smc, "log_span", "log_span"),
+        (Pool.refit_smc, "n_particles", "n_particles"),
+        (Pool.refit_smc, "ess_fraction", "ess_fraction"),
+        (Pool.refit_smc, "n_moves", "n_moves"),
+        (Pool.refit_smc, "max_rungs", "max_rungs"),
+        (Pool.refit_smc, "step_scale", "step_scale"),
+        (Pool.refit_smc, "step_floor", "step_floor"),
+        (Pool.refit_smc, "log_span", "log_span"),
+        (Pool.refit_smc, "rel_floor", "rel_floor"),
+        (Pool.refit_smc, "rho", "rho"),
+        (Pool.refit_smc, "sigma_floor", "sigma_floor"),
         (log_prior, "lam", "lam"),
         (adaptive_cap, "tau_c", "tau_c"),
         (adaptive_cap, "tau_fit", "tau_fit"),
@@ -133,6 +154,17 @@ def test_from_dict_fills_missing_fields_and_rejects_unknown_ones():
         {"tau_e": -0.1},
         {"n_e_max": -1},
         {"n_min": 25},
+        {"n_particles": 0},
+        {"ess_fraction": 1.0},
+        {"ess_fraction": -0.1},
+        {"n_moves": -1},
+        {"max_rungs": 0},
+        {"step_scale": 0.0},
+        {"step_floor": -1e-3},
+        # The SMC likelihood is defined for the whitened residual only (D18)
+        {"evidence": "smc", "residual": "log1p"},
+        # tempered_smc rejects a span below 1 for its log-uniform prior, the default (D18)
+        {"evidence": "smc", "log_span": 0.5},
         {"passive_c_a": ()},
         {"passive_rest": (0.0, 1.0)},
     ],
@@ -155,7 +187,16 @@ OPTIONS = [f.name for f in fields(MDAConfig) if isinstance(f.type, TypeAliasType
 
 
 def test_options_are_the_literal_fields():
-    assert set(OPTIONS) == {"residual", "bic", "check", "design", "design_space", "llm_effort"}
+    assert set(OPTIONS) == {
+        "residual",
+        "evidence",
+        "bic",
+        "param_prior",
+        "check",
+        "design",
+        "design_space",
+        "llm_effort",
+    }
 
 
 @pytest.mark.parametrize("name", OPTIONS)
@@ -173,3 +214,10 @@ def test_boundary_values_are_allowed():
     # No experiments, one random start, no expansion rounds, expansion at any error, and a cap
     # that does not change
     replace(DEFAULTS, n_active=0, n_starts=1, r_m=0, n_e_max=0, tau_e=0.0, n_min=24, n_max=24)
+    # Importance sampling from the prior: no moves, and a target that never asks for a rung
+    replace(DEFAULTS, evidence="smc", n_particles=1, ess_fraction=0.0, n_moves=0, step_floor=0.0)
+    # What the SMC control rejects is allowed where the SMC does not read it: in the BIC arm,
+    # and a small span under the paper's prior, which has no span
+    replace(DEFAULTS, residual="log1p", log_span=0.5)
+    replace(DEFAULTS, evidence="smc", param_prior="uniform", log_span=0.5)
+    replace(DEFAULTS, evidence="smc", lam=2.0, log_span=1.0)

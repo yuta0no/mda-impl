@@ -3,6 +3,9 @@
 `Pool.add` takes new hypotheses, dropping exact-expression duplicates (D13). `Pool.refit` fits
 every candidate to all the data, as each update does (Alg. 9). `mda.posterior` turns the pool's
 `rss` and `n_free` into weights and chooses which candidates `Pool.keep` retains.
+
+In the SMC control (spec §8), `Pool.refit_smc` takes the place of `Pool.refit`: it runs tempered
+SMC for every candidate, and the weights come from the pool's `log_z`.
 """
 
 import math
@@ -15,8 +18,9 @@ from jaxtyping import Int
 
 from mda.arrays import Conditions, ParamCounts, PerModel, Rates
 from mda.config import DEFAULTS, Residual
-from mda.fit import FitResult, fit, relative_residuals
+from mda.fit import FitResult, fit, relative_residuals, residuals, sigma
 from mda.hypothesis import Hypothesis, Model, compile_hypothesis, normalise_expr
+from mda.smc import SMCResult, tempered_smc
 
 
 class Origin(StrEnum):
@@ -40,6 +44,9 @@ class Candidate:
     # Median relative residual of `fit` on that data (D5): inf when the fit is not ok, NaN until
     # the first fit
     fit_err: float = math.nan
+    # The particle posterior on that data, when the pool was last refitted by `Pool.refit_smc`;
+    # `fit` is then its best-fitting particle (D21). None after `Pool.refit`
+    smc: SMCResult | None = None
 
     @property
     def n_free(self) -> int:
@@ -111,7 +118,7 @@ class Pool:
         from its estimate (D8). The candidates draw from `rng` in pool order, so the result
         depends only on the pool, the data and `rng`'s state. `rel_floor` is the floor c of the
         relative residual (D5); `rho`, `sigma_floor` and `log_span` are passed to `fit`. If a fit
-        raises, the pool is left unchanged.
+        raises, the pool is left unchanged. A candidate's `smc` is dropped: it is not of this fit.
         """
         refitted: list[Candidate] = []
         for c in self._candidates:
@@ -129,7 +136,70 @@ class Pool:
                 log_span=log_span,
             )
             err = np.median(relative_residuals(y, res.y_hat, rel_floor)) if res.ok else math.inf
-            refitted.append(replace(c, fit=res, fit_err=float(err)))
+            refitted.append(replace(c, fit=res, fit_err=float(err), smc=None))
+        self._candidates = refitted
+
+    def refit_smc(
+        self,
+        X: Conditions,
+        y: Rates,
+        *,
+        rng: np.random.Generator,
+        n_particles: int = DEFAULTS.n_particles,
+        ess_fraction: float = DEFAULTS.ess_fraction,
+        n_moves: int = DEFAULTS.n_moves,
+        max_rungs: int = DEFAULTS.max_rungs,
+        step_scale: float = DEFAULTS.step_scale,
+        step_floor: float = DEFAULTS.step_floor,
+        log_span: float | None = DEFAULTS.log_span,
+        rel_floor: float = DEFAULTS.rel_floor,
+        rho: float = DEFAULTS.rho,
+        sigma_floor: float = DEFAULTS.sigma_floor,
+    ) -> None:
+        """Run tempered SMC for every candidate on all of (X, y): the SMC control (spec §8).
+
+        It replaces each candidate's `smc`, the particle posterior with its log evidence, and
+        with it `fit` and `fit_err`. The point estimate is the best-fitting particle (D21), and
+        `fit.rss` the whitened RSS there, so whatever reads a fit works as it does after `refit`:
+        prediction, the predictive check, the adaptive cap and the proposer. A candidate that
+        is non-finite over its whole box gets `log_z = -inf` and a fit that is not ok.
+
+        Every run starts from the prior: no particle is carried over from the previous update.
+        The candidates draw from `rng` in pool order, so the result depends only on the pool,
+        the data and `rng`'s state. `log_span` gives a parameter whose bounds span more than it
+        a log-uniform prior (D18); None is the paper's uniform prior. `rho` and `sigma_floor`
+        set the noise scale of the likelihood, which is the whitening scale of `mda.fit`;
+        `rel_floor` is the floor c of the relative residual (D5); the other settings are passed
+        to `tempered_smc`. If a run raises, the pool is left unchanged.
+        """
+        s = sigma(y, rho, sigma_floor)
+        refitted: list[Candidate] = []
+        for c in self._candidates:
+            run = tempered_smc(
+                c.hypothesis,
+                X,
+                y,
+                rng=rng,
+                n_particles=n_particles,
+                ess_fraction=ess_fraction,
+                n_moves=n_moves,
+                max_rungs=max_rungs,
+                step_scale=step_scale,
+                step_floor=step_floor,
+                log_span=log_span,
+                sigma_n=s,
+                f=c.f,
+            )
+            theta = run.particles[run.best].copy()
+            y_hat = c.f(theta, X)
+            with np.errstate(over="ignore"):
+                rss = float(
+                    np.sum(residuals(y, y_hat, "whitened", rho=rho, sigma_floor=sigma_floor) ** 2)
+                )
+            ok = math.isfinite(rss)  # exactly when the particle's likelihood is positive
+            res = FitResult(theta, rss if ok else math.inf, y_hat, ok)
+            err = np.median(relative_residuals(y, y_hat, rel_floor)) if ok else math.inf
+            refitted.append(replace(c, fit=res, fit_err=float(err), smc=run))
         self._candidates = refitted
 
     def keep(self, indices: Iterable[int] | Int[np.ndarray, " k"]) -> None:
@@ -154,6 +224,15 @@ class Pool:
         """The in-sample median relative residual of each candidate: inf where the fit is not ok."""
         self._fits()
         return np.array([c.fit_err for c in self._candidates], dtype=float)
+
+    @property
+    def log_z(self) -> PerModel:
+        """The log evidence of each candidate, from `refit_smc`: -inf where it has none."""
+        runs = [c.smc for c in self._candidates if c.smc is not None]
+        if len(runs) < len(self._candidates):
+            names = [c.hypothesis.name for c in self._candidates if c.smc is None]
+            raise RuntimeError(f"candidates without an SMC run on the current data: {names}")
+        return np.array([r.log_z for r in runs], dtype=float)
 
     def _fits(self) -> list[FitResult]:
         fits = [c.fit for c in self._candidates if c.fit is not None]

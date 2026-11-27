@@ -1,7 +1,7 @@
 """`MDAConfig`: every hyperparameter of the ChemBench experiment, in one place.
 
 Each field cites the paper (arXiv:2608.09696v5) or a default of ours from
-`docs/chembench-spec.md` (D1-D20). The other modules take these values as arguments and never
+`docs/chembench-spec.md` (D1-D21). The other modules take these values as arguments and never
 hard-code them; their keyword defaults come from `DEFAULTS`, so a call that names no value uses
 the same one as the primary arm.
 
@@ -13,7 +13,9 @@ from dataclasses import asdict, dataclass, fields
 from typing import Any, Literal, TypeAliasType, get_args, get_origin
 
 type Residual = Literal["whitened", "log1p"]  # the residual whose sum of squares is the RSS (D1)
+type Evidence = Literal["bic", "smc"]  # how a model's evidence is estimated (spec §3, §8)
 type Bic = Literal["profiled", "fixed"]  # the noise scale of the BIC (spec §3)
+type Prior = Literal["uniform", "log_uniform"]  # the parameter prior of the SMC evidence (D18)
 type Check = Literal["cached", "prequential"]  # the predictive-check variant (D5)
 type Design = Literal["cma", "random"]  # how the next condition is chosen (spec §6)
 type Space = Literal["raw", "log1p"]  # the space in which V(a) compares predictions (D9)
@@ -42,9 +44,25 @@ class MDAConfig:
     log_span: float = 100.0  # bounds spanning more than two decades are fitted in log space (D8)
 
     # Model weights (spec §3)
+    # How a model's evidence is estimated: "bic" from its point estimate, or "smc" by tempered
+    # SMC, the control of spec §8, which the next block sets up
+    evidence: Evidence = "bic"
     bic: Bic = "profiled"  # the headline configuration; "fixed" is the tau = 1 control (App. B.4)
     rss_floor: float = 1e-12  # floor of RSS / N in the profiled-scale BIC (D2)
-    lam: float = 0.0  # structure prior p(m) ∝ exp(-lam C_m): none in the BIC arm (Table 2)
+    # Structure prior p(m) ∝ exp(-lam C_m): none in the BIC arm (Table 2), 2 in the SMC control
+    lam: float = 0.0
+
+    # SMC evidence (spec §8, D18); read only when `evidence` is "smc"
+    n_particles: int = 100  # N_p, parameter particles per structure (Fig. 7 caption)
+    ess_fraction: float = 0.5  # eta: a rung keeps the effective sample size at eta N_p
+    n_moves: int = 5  # R_p, random-walk Metropolis moves per rung
+    max_rungs: int = 100  # J_p, the rung cap; the last allowed rung goes straight to beta = 1
+    step_scale: float = 0.5  # proposal scale, in per-coordinate particle standard deviations
+    step_floor: float = 1e-3  # floor of that standard deviation, applied before scaling
+    # The parameter prior. "log_uniform" is uniform in log theta for a parameter whose bounds
+    # span more than `log_span`, and uniform over the bounds for the others: a deviation from
+    # the paper (D18). "uniform" is the paper's prior, uniform whatever the span (App. A.4)
+    param_prior: Prior = "log_uniform"
 
     # Pool (spec §4)
     n_init: int = 12  # N_init, laws requested from the LLM at initialisation (Alg. 11, App. B.2)
@@ -100,6 +118,9 @@ class MDAConfig:
             "n_starts",
             "log_span",
             "rss_floor",
+            "n_particles",
+            "max_rungs",
+            "step_scale",
             "rel_floor",
             "sigma0",
             "n_evals",
@@ -108,7 +129,16 @@ class MDAConfig:
             "llm_max_tokens",
             "max_attempts",
         )
-        non_negative = ("n_active", "n_init", "n_new", "r_m", "tau_e", "tau_fit")
+        non_negative = (
+            "n_active",
+            "n_init",
+            "n_new",
+            "r_m",
+            "tau_e",
+            "tau_fit",
+            "n_moves",
+            "step_floor",
+        )
         for name in positive:
             if not getattr(self, name) > 0:
                 raise ValueError(f"{name} must be positive, got {getattr(self, name)}")
@@ -119,6 +149,14 @@ class MDAConfig:
             raise ValueError(f"n_e_max must be non-negative or None, got {self.n_e_max}")
         if self.n_min > self.n_max:
             raise ValueError(f"n_min ({self.n_min}) exceeds n_max ({self.n_max})")
+        if not 0 <= self.ess_fraction < 1:
+            raise ValueError(f"ess_fraction must be in [0, 1), got {self.ess_fraction}")
+        if self.evidence == "smc" and self.residual != "whitened":
+            # The likelihood of the SMC is Gaussian on the whitened residual. The log1p residual
+            # would need a noise scale in log space, which the spec does not define (D18)
+            raise ValueError(f"the SMC evidence needs the whitened residual, got {self.residual!r}")
+        if self.evidence == "smc" and self.param_prior == "log_uniform" and self.log_span < 1:
+            raise ValueError(f"a log-uniform prior needs log_span >= 1, got {self.log_span}")
         if not self.passive_c_a:
             raise ValueError("passive_c_a is empty: the agent needs passive data to start from")
         if len(self.passive_rest) != 6:

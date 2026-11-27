@@ -5,10 +5,13 @@ import numpy as np
 import pytest
 
 from mda.bench import INPUT_NAMES, World, WorldSpec, from_unit
+from mda.config import DEFAULTS
+from mda.fit import sigma
 from mda.hypothesis import Hypothesis, HypothesisError, Param, compile_hypothesis
 from mda.library import SEED_BY_WORLD, SEED_LIBRARY
 from mda.pool import Origin, Pool
 from mda.posterior import adaptive_cap, bic_fixed, bic_profiled, log_weights, prune_top, weights
+from mda.smc import SMCResult, log_likelihood, log_model_weights, tempered_smc
 
 MM = Hypothesis(
     "michaelis_menten",
@@ -27,6 +30,14 @@ BROKEN = Hypothesis("broken", "k * log(C_I - 100)", (Param("k", 0.1, 10.0),))
 FLAT = Hypothesis("flat", "k * C_A + 0 * j", (Param("k", 0.1, 10.0), Param("j", 0.0, 100.0)))
 MM_TRUE = np.array([2.5, 0.7])
 CA = INPUT_NAMES.index("C_A")
+# Michaelis-Menten and a line in boxes that 100 particles can search: the seed bounds, six
+# decades wide, are beyond a tempered SMC under the uniform prior (blueprint §11)
+MM_BOX = Hypothesis(
+    "michaelis_menten",
+    "Vmax * C_A / (Km + C_A)",
+    (Param("Vmax", 1.0, 10.0), Param("Km", 0.1, 5.0)),
+)
+LINE_BOX = Hypothesis("linear", "k * C_A", (Param("k", 0.0, 10.0),))
 
 # Passive data D0 (spec §1): C_A in {0.03, 0.3, 3}, other inputs at (0, 1, 0, 1, 310, 7)
 D0 = np.array([[a, 0.0, 1.0, 0.0, 1.0, 310.0, 7.0] for a in (0.03, 0.3, 3.0)])
@@ -366,3 +377,202 @@ def test_refit_then_weights_reproduces_alg_9():
     refit(pool, X, y, seed=1)
     wts = weights(bic_profiled(pool.rss, pool.n_free, n))
     assert wts[list(keep).index(true)] > 0.99
+
+
+# refit_smc: the SMC control (spec §8)
+
+
+def smc_of(c) -> SMCResult:
+    assert c.smc is not None
+    return c.smc
+
+
+def test_refit_smc_runs_the_sampler_for_every_candidate_in_pool_order():
+    X, y = mm_data()
+    pool = pool_of(MM_BOX, LINE_BOX, BROKEN)
+    pool.refit_smc(X, y, rng=np.random.default_rng(3))
+    # One generator, passed from one candidate to the next
+    rng = np.random.default_rng(3)
+    for c in pool:
+        expected = tempered_smc(c.hypothesis, X, y, rng=rng, sigma_n=sigma(y), f=c.f)
+        np.testing.assert_array_equal(smc_of(c).particles, expected.particles)
+        np.testing.assert_array_equal(smc_of(c).loglik, expected.loglik)
+        assert smc_of(c).log_z == expected.log_z
+    np.testing.assert_array_equal(pool.log_z, [smc_of(c).log_z for c in pool])
+    # The data are Michaelis-Menten's: a line does far worse, and `broken` explains nothing
+    assert pool.log_z[0] > pool.log_z[1] + 100 and pool.log_z[2] == -math.inf
+    assert [c.hypothesis for c in pool] == [MM_BOX, LINE_BOX, BROKEN]
+    assert [(c.origin, c.added_at) for c in pool] == [(Origin.INIT, 3)] * 3
+
+
+def test_point_estimate_of_refit_smc_is_the_best_fitting_particle():
+    X, y = mm_data()
+    pool = pool_of(MM_BOX, LINE_BOX)
+    pool.refit_smc(X, y, rng=np.random.default_rng(0))
+    for c in pool:
+        run, fit = smc_of(c), c.fit
+        assert fit is not None and fit.ok
+        np.testing.assert_array_equal(fit.theta, run.particles[run.best])
+        assert not np.shares_memory(fit.theta, run.particles)
+        np.testing.assert_array_equal(fit.y_hat, c.f(fit.theta, X))
+        # The RSS is the whitened one of `mda.fit`, the smallest among the particles, and the
+        # likelihood of the SMC is exp(-RSS / 2) up to a constant
+        rss = [float(np.sum(((y - c.f(theta, X)) / sigma(y)) ** 2)) for theta in run.particles]
+        assert fit.rss == pytest.approx(min(rss), rel=1e-12)
+        const = log_likelihood(y, y, sigma(y))
+        assert run.loglik.max() == pytest.approx(const - 0.5 * fit.rss, rel=1e-12)
+        rel = np.abs(y - fit.y_hat) / np.maximum(np.abs(y), 0.01)
+        assert c.fit_err == pytest.approx(float(np.median(rel)))
+    # What reads a fit reads these: the pool's arrays, as after `refit`
+    np.testing.assert_array_equal(pool.rss, [c.fit.rss for c in pool if c.fit is not None])
+    np.testing.assert_array_equal(pool.fit_err, [c.fit_err for c in pool])
+    # A posterior draw near the mode, not the mode: close to the truth, and not on it
+    mm = pool[0].fit
+    assert mm is not None
+    np.testing.assert_allclose(mm.theta, MM_TRUE, rtol=0.05)
+    assert 0 < mm.rss < 5 and 0 < pool.fit_err[0] < 0.02
+    assert pool.fit_err[1] > 0.05  # a line cannot saturate
+    # A larger floor c shrinks the relative residual, as it does for `refit`
+    pool.refit_smc(X, y, rng=np.random.default_rng(0), rel_floor=1e3)
+    assert pool[0].fit_err == pytest.approx(float(np.median(np.abs(y - mm.y_hat))) / 1e3)
+
+
+def test_candidate_without_evidence_has_a_failed_fit():
+    X, y = mm_data()
+    pool = pool_of(BROKEN, MM_BOX)
+    pool.refit_smc(X, y, rng=np.random.default_rng(0))
+    broken = pool[0]
+    assert broken.fit is not None and not broken.fit.ok and not smc_of(broken).ok
+    assert pool.log_z[0] == -math.inf and pool.rss[0] == np.inf and pool.fit_err[0] == np.inf
+    # It gets weight 0 and is the first to be pruned
+    log_w = log_model_weights(pool.log_z, pool.n_free, 2.0)
+    np.testing.assert_array_equal(np.exp(log_w), [0.0, 1.0])
+    np.testing.assert_array_equal(prune_top(log_w, 1)[0], [1])
+
+
+def test_refit_smc_passes_its_settings_to_the_sampler():
+    X, y = mm_data()
+
+    def reference(
+        *,
+        n_particles: int = 40,
+        ess_fraction: float = 0.7,
+        n_moves: int = 2,
+        max_rungs: int = 3,
+        step_scale: float = 0.3,
+        # Above any standard deviation the particles can have in these boxes, so that the
+        # floor sets the proposal scale
+        step_floor: float = 5.0,
+        log_span: float | None = 5.0,
+        # The rates run from 0.06 to 2.5, so each of the two sets part of the noise scale
+        rho: float = 0.5,
+        sigma_floor: float = 0.5,
+    ) -> SMCResult:
+        """The run of `tempered_smc` itself, with every setting away from its default."""
+        return tempered_smc(
+            MM_BOX,
+            X,
+            y,
+            rng=np.random.default_rng(0),
+            n_particles=n_particles,
+            ess_fraction=ess_fraction,
+            n_moves=n_moves,
+            max_rungs=max_rungs,
+            step_scale=step_scale,
+            step_floor=step_floor,
+            log_span=log_span,
+            sigma_n=sigma(y, rho, sigma_floor),
+        )
+
+    pool = pool_of(MM_BOX)
+    pool.refit_smc(
+        X,
+        y,
+        rng=np.random.default_rng(0),
+        n_particles=40,
+        ess_fraction=0.7,
+        n_moves=2,
+        max_rungs=3,
+        step_scale=0.3,
+        step_floor=5.0,
+        log_span=5.0,
+        rho=0.5,
+        sigma_floor=0.5,
+    )
+    run = smc_of(pool[0])
+    np.testing.assert_array_equal(run.particles, reference().particles)
+    assert run.log_z == reference().log_z
+    # No setting is idle here: with any one of them at its default, the run is another one
+    d = DEFAULTS
+    others = [
+        reference(n_particles=d.n_particles),
+        reference(ess_fraction=d.ess_fraction),
+        reference(n_moves=d.n_moves),
+        reference(max_rungs=d.max_rungs),
+        reference(step_scale=d.step_scale),
+        reference(step_floor=d.step_floor),
+        reference(log_span=d.log_span),
+        reference(log_span=None),
+        reference(rho=d.rho),
+        reference(sigma_floor=d.sigma_floor),
+    ]
+    assert all(other.log_z != run.log_z for other in others)
+    # The fit's RSS uses the noise scale of the likelihood
+    fit = pool[0].fit
+    assert fit is not None
+    expected = float(np.sum(((y - fit.y_hat) / sigma(y, 0.5, 0.5)) ** 2))
+    assert fit.rss == pytest.approx(expected, rel=1e-12)
+
+
+def test_evidence_needs_a_refit_smc():
+    X, y = mm_data()
+    pool = pool_of(MM_BOX)
+    with pytest.raises(RuntimeError, match="michaelis_menten"):
+        _ = pool.log_z
+    pool.refit_smc(X, y, rng=np.random.default_rng(0))
+    assert pool.log_z.shape == (1,)
+    pool.add([LINE_BOX], Origin.EXPAND, added_at=25)  # with and without evidence never mix
+    with pytest.raises(RuntimeError, match="linear"):
+        _ = pool.log_z
+    # A least-squares refit replaces the point estimate, so the particles are no longer its
+    # posterior and are dropped
+    refit(pool, X, y)
+    assert [c.smc for c in pool] == [None, None]
+    with pytest.raises(RuntimeError, match="michaelis_menten.*linear"):
+        _ = pool.log_z
+    assert Pool().log_z.shape == (0,)
+
+
+def test_refit_smc_that_raises_leaves_the_pool_unchanged():
+    X, y = mm_data()
+    pool = pool_of(MM_BOX, LINE_BOX)
+    pool.refit_smc(X, y, rng=np.random.default_rng(0))
+    before = list(pool)
+    with pytest.raises(ValueError, match="n_particles"):
+        pool.refit_smc(X, y, rng=np.random.default_rng(1), n_particles=0)
+    assert list(pool) == before
+
+
+def test_keep_preserves_the_particles():
+    X, y = mm_data()
+    pool = pool_of(MM_BOX, BROKEN, LINE_BOX)
+    pool.refit_smc(X, y, rng=np.random.default_rng(0))
+    mm, _, line = pool
+    log_z = pool.log_z
+    pool.keep([0, 2])
+    assert list(pool) == [mm, line] and pool[1].smc is line.smc
+    np.testing.assert_array_equal(pool.log_z, log_z[[0, 2]])
+
+
+def test_refit_smc_starts_from_the_prior_each_time():
+    # Nothing is carried over: a second run with the same generator state repeats the first,
+    # whatever the candidate held before
+    X, y = mm_data()
+    pool = pool_of(MM_BOX)
+    pool.refit_smc(X[:3], y[:3], rng=np.random.default_rng(0))
+    assert smc_of(pool[0]).loglik.shape == (DEFAULTS.n_particles,)
+    pool.refit_smc(X, y, rng=np.random.default_rng(5))
+    fresh = pool_of(MM_BOX)
+    fresh.refit_smc(X, y, rng=np.random.default_rng(5))
+    np.testing.assert_array_equal(smc_of(pool[0]).particles, smc_of(fresh[0]).particles)
+    assert pool[0].fit is not None and pool[0].fit.y_hat.shape == (25,)
