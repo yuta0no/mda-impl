@@ -36,7 +36,9 @@ class MDAConfig:
     rho: float = 0.03  # relative noise scale of the whitening (App. A.6.3, eq. 46)
     sigma_floor: float = 0.01  # absolute floor of the whitening scale (App. A.6.3, eq. 46)
     residual: Residual = "whitened"  # D1
-    n_starts: int = 8  # random starts per fit, on top of the warm start (D8)
+    # Random starts per fit, on top of the warm start (D8). At least one: a new candidate has no
+    # warm start, and `fit` needs a start
+    n_starts: int = 8
     log_span: float = 100.0  # bounds spanning more than two decades are fitted in log space (D8)
 
     # Model weights (spec §3)
@@ -95,6 +97,7 @@ class MDAConfig:
         positive = (
             "rho",
             "sigma_floor",
+            "n_starts",
             "log_span",
             "rss_floor",
             "rel_floor",
@@ -105,7 +108,7 @@ class MDAConfig:
             "llm_max_tokens",
             "max_attempts",
         )
-        non_negative = ("n_active", "n_starts", "n_init", "n_new", "r_m", "tau_e", "tau_fit")
+        non_negative = ("n_active", "n_init", "n_new", "r_m", "tau_e", "tau_fit")
         for name in positive:
             if not getattr(self, name) > 0:
                 raise ValueError(f"{name} must be positive, got {getattr(self, name)}")

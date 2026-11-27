@@ -128,7 +128,7 @@ def test_from_dict_fills_missing_fields_and_rejects_unknown_ones():
         {"n_query": 0},
         {"max_attempts": 0},
         {"n_active": -1},
-        {"n_starts": -1},
+        {"n_starts": 0},  # a new candidate has no warm start, so `fit` would have no start
         {"r_m": -1},
         {"tau_e": -0.1},
         {"n_e_max": -1},
@@ -170,6 +170,6 @@ def test_unsupported_options_raise_at_load_time(name):
 
 
 def test_boundary_values_are_allowed():
-    # No experiments, no random starts (a warm start remains), no expansion rounds, expansion
-    # at any error, and a cap that does not change
-    replace(DEFAULTS, n_active=0, n_starts=0, r_m=0, n_e_max=0, tau_e=0.0, n_min=24, n_max=24)
+    # No experiments, one random start, no expansion rounds, expansion at any error, and a cap
+    # that does not change
+    replace(DEFAULTS, n_active=0, n_starts=1, r_m=0, n_e_max=0, tau_e=0.0, n_min=24, n_max=24)
